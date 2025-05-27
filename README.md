@@ -58,12 +58,16 @@ z.attrs['experiment'] = config  # Just works!
 
 ## Installation
 
+See for the last release: https://github.com/fherb2/zarrcompatibility/releases
+
+and write by changing the release: 
+
 ```bash
 # Basic installation
 pip install zarrcompatibility
 
-# With Zarr support
-pip install zarrcompatibility[zarr]
+# Poetry install
+poetry add https://github.com/fherb2/zarrcompatibility/releases/download/v1.0.3/zarrcompatibility-1.0.3-py3-none-any.whl
 
 # Development installation
 pip install -e .[dev,test,zarr]

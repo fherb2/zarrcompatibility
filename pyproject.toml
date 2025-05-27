@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "zarrcompatibility"
-version = "1.0.0"
+version = "0.0.0"
 description = "Universal JSON serialization for Python objects with Zarr compatibility"
 authors = ["F. Herbrand <your.email@example.com>"]
 maintainers = ["F. Herbrand <your.email@example.com>"]
@@ -37,12 +37,17 @@ classifiers = [
 packages = [{include = "zarrcompatibility", from = "src"}]
 include = ["src/zarrcompatibility/py.typed"]
 
+[tool.poetry-dynamic-versioning]
+enable = true
+vcs = "git"
+style = "semver"
+
 [tool.poetry.urls]
 "Bug Tracker" = "https://github.com/yourusername/zarrcompatibility/issues"
 "Changelog" = "https://github.com/yourusername/zarrcompatibility/blob/main/CHANGELOG.md"
 
 [tool.poetry.dependencies]
-python = ">=3.9"
+python = ">=3.9,<4.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=7.0.0"
@@ -52,6 +57,7 @@ isort = ">=5.12.0"
 flake8 = ">=6.0.0"
 mypy = ">=1.0.0"
 pre-commit = ">=3.0.0"
+poetry-dynamic-versioning = "^1.8.2"
 
 [tool.poetry.group.test.dependencies]
 pytest = ">=7.0.0"
@@ -72,8 +78,8 @@ zarr = ">=2.10.0"
 numpy = ">=1.20.0"
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning"]
+build-backend = "poetry_dynamic_versioning.backend"
 
 # isort configuration
 [tool.isort]
