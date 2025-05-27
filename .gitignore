@@ -172,3 +172,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+
+
+
+
+# Ausnahmen am Ende (überschreiben alles vorherige)
+!dist/
+!dist/*.whl
+!dist/*.tar.gz

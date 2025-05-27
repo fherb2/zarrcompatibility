@@ -1,0 +1,167 @@
+[tool.poetry]
+name = "zarrcompatibility"
+version = "1.0.0"
+description = "Universal JSON serialization for Python objects with Zarr compatibility"
+authors = ["F. Herbrand <your.email@example.com>"]
+maintainers = ["F. Herbrand <your.email@example.com>"]
+readme = "README.md"
+license = "MIT"
+homepage = "https://github.com/yourusername/zarrcompatibility"
+repository = "https://github.com/yourusername/zarrcompatibility.git"
+documentation = "https://zarrcompatibility.readthedocs.io/"
+keywords = [
+    "zarr",
+    "json",
+    "serialization",
+    "scientific-computing",
+    "data-storage",
+    "metadata",
+    "hdf5-alternative"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Archiving",
+    "Topic :: Utilities",
+]
+packages = [{include = "zarrcompatibility", from = "src"}]
+include = ["src/zarrcompatibility/py.typed"]
+
+[tool.poetry.urls]
+"Bug Tracker" = "https://github.com/yourusername/zarrcompatibility/issues"
+"Changelog" = "https://github.com/yourusername/zarrcompatibility/blob/main/CHANGELOG.md"
+
+[tool.poetry.dependencies]
+python = ">=3.9"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0.0"
+pytest-cov = ">=4.0.0"
+black = ">=23.0.0"
+isort = ">=5.12.0"
+flake8 = ">=6.0.0"
+mypy = ">=1.0.0"
+pre-commit = ">=3.0.0"
+
+[tool.poetry.group.test.dependencies]
+pytest = ">=7.0.0"
+pytest-cov = ">=4.0.0"
+zarr = ">=2.10.0"
+numpy = ">=1.20.0"
+
+[tool.poetry.group.docs.dependencies]
+mkdocs = ">=1.5.0"
+mkdocs-material = ">=9.0.0"
+mkdocstrings = {extras = ["python"], version = ">=0.24.0"}
+mkdocs-gen-files = ">=0.5.0"
+mkdocs-literate-nav = ">=0.6.0"
+mkdocs-section-index = ">=0.3.0"
+
+[tool.poetry.group.zarr.dependencies]
+zarr = ">=2.10.0"
+numpy = ">=1.20.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# isort configuration
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+# pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--verbose",
+    "--cov=zarrcompatibility",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-report=xml",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "zarr: marks tests that require zarr to be installed",
+]
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["src/zarrcompatibility"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "setup.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+# mypy configuration
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# Flake8 configuration
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
+exclude = [
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    ".eggs",
+    "*.egg-info",
+    ".venv",
+    ".tox",
+]

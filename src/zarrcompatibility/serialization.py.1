@@ -49,12 +49,11 @@ def serialize_object(obj: Any) -> Any:
     3. Objects with to_dict() method  
     4. Dataclasses (via dataclasses.asdict)
     5. Enums (via .value)
-    6. Callable objects without __dict__ (converted to string)
-    7. Built-in types (datetime, UUID, Decimal, etc.)
-    8. Objects with __dict__ attribute
-    9. Iterables (lists, tuples, sets)
-    10. Mappings (dictionaries)
-    11. Fallback to string representation
+    6. Built-in types (datetime, UUID, Decimal, etc.)
+    7. Objects with __dict__ attribute
+    8. Iterables (lists, tuples, sets)
+    9. Mappings (dictionaries)
+    10. Fallback to string representation
     
     Args:
         obj: Any Python object to serialize
@@ -169,7 +168,6 @@ def deserialize_object(data: Any, target_class: Optional[Type] = None) -> Any:
     
     Attempts to reconstruct objects from their JSON representation.
     Works best when target_class is provided, but can handle basic cases automatically.
-    Supports dataclasses and classes with appropriate constructors.
     
     Args:
         data: JSON data (typically dict) to deserialize
@@ -289,9 +287,6 @@ class JSONSerializable:
     """
     Mixin class that adds JSON serialization methods to any class.
     
-    This mixin provides robust serialization methods that preserve native
-    Python types (lists, dicts) and handle complex nested structures.
-    
     Usage:
         class MyClass(JSONSerializable):
             def __init__(self, value):
@@ -300,94 +295,47 @@ class JSONSerializable:
         obj = MyClass(42)
         json_str = obj.to_json()
         obj_copy = MyClass.from_json(json_str)
-    
-    Methods:
-        __json__(): Returns dict representation for JSON serialization
-        to_dict(): Converts object to dictionary, preserving native types
-        to_json(): Converts object to JSON string
-        from_dict(): Class method to create instance from dictionary
-        from_json(): Class method to create instance from JSON string
     """
     
     def __json__(self):
         """Return JSON-serializable representation."""
-        # Use to_dict() instead of serialize_object to ensure dict output
-        return self.to_dict()
+        return serialize_object(self)
     
     def to_dict(self):
-        """
-        Convert object to dictionary.
-        
-        Preserves native Python types (lists, dicts, etc.) without 
-        over-serialization to strings. Only serializes complex objects
-        that are not JSON-compatible.
-        
-        Returns:
-            Dict representation of the object
-        """
-        # Direct approach: extract attributes without over-serialization
-        if hasattr(self, '__dict__'):
-            result = {}
-            for key, value in self.__dict__.items():
-                if not key.startswith('_') and not callable(value):
-                    # Only serialize complex objects, keep simple types as-is
-                    if isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                        result[key] = value
-                    else:
-                        result[key] = serialize_object(value)
+        """Convert object to dictionary."""
+        result = serialize_object(self)
+        # Ensure we return a dict, not a string representation
+        if isinstance(result, dict):
             return result
-        return {}
+        else:
+            # Fallback: create dict from object attributes
+            if hasattr(self, '__dict__'):
+                return {key: serialize_object(value) 
+                       for key, value in self.__dict__.items() 
+                       if not key.startswith('_') and not callable(value)}
+            return {}
     
     def to_json(self, **kwargs):
-        """
-        Convert object to JSON string.
-        
-        Uses the object's dict representation to avoid double-serialization
-        issues that can occur when complex objects are serialized multiple times.
-        
-        Args:
-            **kwargs: Additional arguments passed to json.dumps()
-            
-        Returns:
-            JSON string representation of the object
-        """
-        # Get the dict representation first, then serialize that
-        dict_repr = self.to_dict()
-        return json.dumps(dict_repr, **kwargs)
+        """Convert object to JSON string."""
+        # Use the universal encoder to handle serialization
+        return json.dumps(self, cls=UniversalJSONEncoder, **kwargs)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
-        """
-        Create instance from dictionary.
-        
-        Attempts direct construction first, then falls back to
-        deserialization methods. Handles various edge cases
-        robustly.
-        
-        Args:
-            data: Dictionary containing object data
-            
-        Returns:
-            Instance of this class
-        """
-        if not isinstance(data, dict):
-            return data
-            
-        try:
-            # Try direct construction first
-            return cls(**data)
-        except Exception:
-            # If that fails, try deserialize_object
-            result = deserialize_object(data, cls)
-            if isinstance(result, cls):
-                return result
-            elif isinstance(result, dict):
-                try:
-                    return cls(**result)
-                except Exception:
-                    return result
-            else:
-                return result
+        """Create instance from dictionary."""
+        result = deserialize_object(data, cls)
+        # If deserialization didn't work, try direct construction
+        if isinstance(result, dict) and result is not data:
+            try:
+                return cls(**result)
+            except Exception:
+                pass
+        elif not isinstance(result, cls):
+            try:
+                return cls(**data)
+            except Exception:
+                pass
+        return result
     
     @classmethod
     def from_json(cls, json_str: str):
@@ -401,19 +349,6 @@ class ZarrCompatible(JSONSerializable):
     Enhanced mixin specifically designed for Zarr compatibility.
     
     Provides additional methods for working with Zarr metadata and attributes.
-    Includes intelligent parameter filtering to handle cases where stored
-    data contains more fields than the constructor expects.
-    
-    Example:
-        class ExperimentInfo(ZarrCompatible):
-            def __init__(self, name, version):
-                self.name = name
-                self.version = version
-                self.created_at = datetime.now()  # Auto-added field
-        
-        info = ExperimentInfo("test", "1.0")
-        info.save_to_zarr_group(zarr_group)
-        loaded = ExperimentInfo.load_from_zarr_group(zarr_group)
     """
     
     def to_zarr_attrs(self) -> Dict[str, Any]:
@@ -455,10 +390,6 @@ class ZarrCompatible(JSONSerializable):
         """
         Load this object from a Zarr group's attributes.
         
-        Intelligently handles parameter filtering - only passes constructor
-        parameters that the class actually accepts, ignoring additional
-        fields that may have been stored (like auto-generated timestamps).
-        
         Args:
             zarr_group: Zarr group object
             attr_name: Name of the attribute to load this object from
@@ -467,44 +398,21 @@ class ZarrCompatible(JSONSerializable):
             Instance of this class
         """
         attrs = zarr_group.attrs[attr_name]
-        
-        # Handle different cases of what might be stored
-        if isinstance(attrs, cls):
-            # Already the right type
-            return attrs
-        elif isinstance(attrs, dict):
-            # Dictionary - construct object directly
-            try:
-                # Get constructor parameters
-                import inspect
-                sig = inspect.signature(cls.__init__)
-                valid_params = list(sig.parameters.keys())
-                valid_params.remove('self')  # Remove 'self' parameter
-                
-                # Filter dict to only include valid constructor parameters
-                filtered_attrs = {k: v for k, v in attrs.items() if k in valid_params}
-                
-                # Try direct construction with filtered dict
-                result = cls(**filtered_attrs)
-                return result
-            except Exception as e:
-                try:
-                    result = cls.from_zarr_attrs(attrs)
-                    return result
-                except Exception as e2:
-                    return attrs
+        # attrs could be a dict or the actual object, handle both cases
+        if isinstance(attrs, dict):
+            return cls.from_zarr_attrs(attrs)
         else:
-            # Try to convert whatever we have to dict first
+            # If it's already an object, try to convert it to dict first
             if hasattr(attrs, '__dict__'):
                 attrs_dict = {key: value for key, value in attrs.__dict__.items() 
                              if not key.startswith('_') and not callable(value)}
-                try:
-                    result = cls(**attrs_dict)
-                    return result
-                except Exception as e:
-                    return cls.from_zarr_attrs(attrs_dict)
+                return cls.from_zarr_attrs(attrs_dict)
             else:
-                return attrs
+                # Last resort: try to create from whatever we have
+                try:
+                    return cls(**attrs) if isinstance(attrs, dict) else attrs
+                except Exception:
+                    return attrs
 
 
 # =============================================================================
@@ -516,8 +424,6 @@ def make_serializable(cls: Type) -> Type:
     Class decorator that adds JSON serialization methods to any class.
     
     This is an alternative to using the JSONSerializable mixin.
-    Adds the same robust serialization methods with proper parameter
-    filtering and native type preservation.
     
     Usage:
         @make_serializable
@@ -526,8 +432,7 @@ def make_serializable(cls: Type) -> Type:
                 self.value = value
         
         obj = MyClass(42)
-        json.dumps(obj)  # Works with global serialization enabled
-        obj.to_json()    # Also works directly
+        json.dumps(obj)  # Works!
     
     Args:
         cls: Class to make serializable
@@ -540,47 +445,38 @@ def make_serializable(cls: Type) -> Type:
     
     # Add to_dict method
     def to_dict_method(self):
-        # Direct approach: extract attributes without over-serialization
-        if hasattr(self, '__dict__'):
-            result = {}
-            for key, value in self.__dict__.items():
-                if not key.startswith('_') and not callable(value):
-                    # Only serialize complex objects, keep simple types as-is
-                    if isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                        result[key] = value
-                    else:
-                        result[key] = serialize_object(value)
+        result = serialize_object(self)
+        # Ensure we return a dict, not a string representation
+        if isinstance(result, dict):
             return result
-        return {}
+        else:
+            # Fallback: create dict from object attributes
+            if hasattr(self, '__dict__'):
+                return {key: serialize_object(value) 
+                       for key, value in self.__dict__.items() 
+                       if not key.startswith('_') and not callable(value)}
+            return {}
     cls.to_dict = to_dict_method
     
-    # Add to_json method - use dict representation to avoid double serialization
-    def to_json_method(self, **kwargs):
-        dict_repr = self.to_dict()
-        return json.dumps(dict_repr, **kwargs)
-    cls.to_json = to_json_method
+    # Add to_json method - use UniversalJSONEncoder
+    cls.to_json = lambda self, **kwargs: json.dumps(self, cls=UniversalJSONEncoder, **kwargs)
     
     # Add from_dict class method
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
-        if not isinstance(data, dict):
-            return data
-            
-        try:
-            # Try direct construction first
-            return cls(**data)
-        except Exception:
-            # If that fails, try deserialize_object
-            result = deserialize_object(data, cls)
-            if isinstance(result, cls):
-                return result
-            elif isinstance(result, dict):
-                try:
-                    return cls(**result)
-                except Exception:
-                    return result
-            else:
-                return result
+        result = deserialize_object(data, cls)
+        # If deserialization didn't work, try direct construction
+        if isinstance(result, dict) and result is not data:
+            try:
+                return cls(**result)
+            except Exception:
+                pass
+        elif not isinstance(result, cls):
+            try:
+                return cls(**data)
+            except Exception:
+                pass
+        return result
     cls.from_dict = from_dict
     
     # Add from_json class method
@@ -721,5 +617,4 @@ if __name__ == "__main__":
         print()
     
     print("All tests completed!")
-    
     
