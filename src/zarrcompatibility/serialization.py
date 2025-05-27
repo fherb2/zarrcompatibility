@@ -4,14 +4,16 @@ Universal JSON Serialization Module for Zarr Compatibility
 This module provides universal JSON serialization capabilities for any Python class,
 making them compatible with Zarr and other systems that require JSON serialization.
 
-Key Features:
-- Works with ANY Python class (dataclasses, regular classes, enums)
-- Automatic serialization/deserialization
-- Zarr-compatible out of the box
-- No class modification required (optional enhancements available)
-- Single import and setup
+## Key Features:
 
-Usage:
+* Works with ANY Python class (dataclasses, regular classes, enums)
+* Automatic serialization/deserialization
+* Zarr-compatible out of the box
+* No class modification required (optional enhancements available)
+* Single import and setup
+
+## Usage:
+
     import zarrcompatibility as zc
     
     # One-time setup (call once at program start)
