@@ -49,6 +49,9 @@ jobs:
     
     - name: Deploy to GitHub Pages
       run: |
-        poetry run mkdocs gh-deploy --force --clean
-        # --force überschreibt den gh-pages branch
-        # --clean entfernt nicht mehr benötigte Dateien
+        echo "Starting deployment..."
+        poetry run mkdocs --version
+        echo "MkDocs config check:"
+        poetry run mkdocs build --verbose
+        echo "Deploying..."
+        poetry run mkdocs gh-deploy --force --verbose
