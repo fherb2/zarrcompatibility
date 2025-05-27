@@ -69,8 +69,6 @@ pip install https://github.com/fherb2/zarrcompatibility/releases/download/v1.0.3
 # Poetry install
 poetry add https://github.com/fherb2/zarrcompatibility/releases/download/v1.0.3/zarrcompatibility-1.0.3-py3-none-any.whl
 
-# Development installation
-pip install -e .[dev,test,zarr]
 ```
 
 ## Quick Start
