@@ -64,7 +64,7 @@ and write by changing the release:
 
 ```bash
 # Basic installation
-pip install zarrcompatibility
+pip install https://github.com/fherb2/zarrcompatibility/releases/download/v1.0.3/zarrcompatibility-1.0.3-py3-none-any.whl
 
 # Poetry install
 poetry add https://github.com/fherb2/zarrcompatibility/releases/download/v1.0.3/zarrcompatibility-1.0.3-py3-none-any.whl
