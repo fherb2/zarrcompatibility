@@ -1,15 +1,24 @@
-site_name: ZarrCompatibility Documentation
-site_description: Universal JSON Serialization for Python Objects
+site_name: zarrcompatibility
+site_description: Universal JSON Serialization for Python Objects with Zarr Compatibility
+site_url: https://fherb2.github.io/zarrcompatibility/
+repo_url: https://github.com/fherb2/zarrcompatibility
+repo_name: fherb2/zarrcompatibility
 
 theme:
-  name: material
+  name: material  # oder readthedocs, mkdocs
   palette:
     - scheme: default
       primary: blue
-      accent: light-blue
-  features:
-    - content.code.copy
-    - content.code.select
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
 
 markdown_extensions:
   - admonition
@@ -25,8 +34,8 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - User Guide: user_guide.md
   - API Reference: api.md
-  - Examples: examples.md
 
 plugins:
   - search

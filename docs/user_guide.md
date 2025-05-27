@@ -384,27 +384,6 @@ pytest -v
 3. **Document Custom Methods**: When implementing `__json__()`, document the serialization format
 4. **Handle Loading**: Remember that loaded objects may be dicts rather than original types
 
-## Integration with MkDocs
-
-To integrate this guide into your MkDocs documentation structure:
-
-1. **Add to nav section** in `mkdocs.yml`:
-```yaml
-nav:
-  - Home: index.md
-  - User Guide:
-    - Getting Started: user-guide/getting-started.md
-    - Universal Serialization: user-guide/universal-serialization.md  # This guide
-    - API Reference: user-guide/api-reference.md
-```
-
-2. **Place the file** at `docs/user-guide/universal-serialization.md`
-
-3. **Update cross-references** in other documentation files to link to this guide:
-```markdown
-For detailed information on serialization, see the [Universal Serialization Guide](universal-serialization.md).
-```
-
 ## Conclusion
 
 The `zarrcompatibility` library makes it effortless to store complex Python objects as metadata in Zarr arrays. By providing universal JSON serialization, it eliminates the common pain points of scientific data storage and enables seamless integration between your Python objects and Zarr's efficient array storage format.

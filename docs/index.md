@@ -21,3 +21,4 @@ class Config:
 
 config = Config("test", datetime.now())
 json.dumps(config)  # Just works!
+```
