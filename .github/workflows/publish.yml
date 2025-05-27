@@ -1,19 +1,15 @@
-name: Publish to GitHub Packages
+name: Build and Release Wheel
 
 on:
   push:
     tags:
-      - 'v*'  # Trigger bei Tags wie v1.0.0
-  # Optional: auch bei Push auf main
-  # push:
-  #   branches: [ main ]
+      - 'v*'
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      packages: write  # Wichtig für GitHub Packages
+      contents: write
     
     steps:
     - uses: actions/checkout@v4
@@ -25,19 +21,17 @@ jobs:
     
     - name: Install Poetry
       uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
     
     - name: Build package
       run: poetry build
     
-    - name: Configure Poetry for GitHub Packages
-      run: |
-        poetry config repositories.github https://upload.pypi.org/legacy/
-        poetry config http-basic.github __token__ ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Publish to GitHub Packages
-      run: poetry publish -r github
-      
+    - name: Create Release with Wheel
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/*.whl
+          dist/*.tar.gz
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
