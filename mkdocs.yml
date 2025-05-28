@@ -5,20 +5,7 @@ repo_url: https://github.com/fherb2/zarrcompatibility
 repo_name: fherb2/zarrcompatibility
 
 theme:
-  name: material  # oder readthedocs, mkdocs
-  palette:
-    - scheme: default
-      primary: blue
-      accent: blue
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-    - scheme: slate
-      primary: blue
-      accent: blue
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
+  name: readthedocs  # Wechsel zu readthedocs - funktioniert zuverlässig
 
 markdown_extensions:
   - admonition
@@ -43,8 +30,8 @@ plugins:
       handlers:
         python:
           options:
-            docstring_style: numpy  # Statt google
-            docstring_section_style: spacy  # Bessere Listen-Formatierung
+            docstring_style: numpy
+            docstring_section_style: spacy
             show_root_heading: true
             show_root_docstring: true
             show_source: false
@@ -53,3 +40,4 @@ plugins:
             show_category_heading: true
             merge_init_into_class: true
             separate_signature: true
+            
