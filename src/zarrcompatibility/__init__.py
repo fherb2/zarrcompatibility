@@ -25,11 +25,6 @@ from .serialization import (
     UniversalJSONEncoder,
 )
 
-# Package metadata
-__version__ = "1.0.0"
-__author__ = "F. Herbrand"
-__description__ = "Universal JSON serialization for Python objects with Zarr compatibility"
-
 # Define what gets imported with "from zarrcompatibility import *"
 __all__ = [
     # Main functions

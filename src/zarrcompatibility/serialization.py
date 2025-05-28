@@ -27,14 +27,12 @@ License: MIT
 """
 
 import json
-import dataclasses
 from dataclasses import is_dataclass, asdict
 from datetime import datetime, date, time
 from enum import Enum
-from typing import Any, Dict, List, Union, Optional, Type, Callable
+from typing import Any, Dict, Optional, Type
 from decimal import Decimal
 from uuid import UUID
-import inspect
 
 
 # =============================================================================
