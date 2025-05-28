@@ -28,12 +28,6 @@ pip install https://github.com/fherb2/zarrcompatibility/releases/download/v1.0.3
 poetry add https://github.com/fherb2/zarrcompatibility/releases/download/v1.0.3/zarrcompatibility-1.0.3-py3-none-any.whl
 ```
 
-For the latest release, update the URL format by changing the version numbers:
-```bash
-# Example with version v1.0.4 (replace with actual latest version)
-pip install https://github.com/fherb2/zarrcompatibility/releases/download/v1.0.4/zarrcompatibility-1.0.4-py3-none-any.whl
-```
-
 ### Development Installation
 
 For development or if you want to contribute:
