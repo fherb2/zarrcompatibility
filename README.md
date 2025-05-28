@@ -6,6 +6,8 @@
 
 `zarrcompatibility` is a Python library that makes **any Python object** compatible with JSON serialization and Zarr storage. It solves the common problem of storing complex metadata alongside scientific data in Zarr arrays.
 
+**[Full documentation](https://fherb2.github.io/zarrcompatibility/)**
+
 ### The Problem
 
 Zarr stores metadata as JSON, but Python's standard JSON serializer can't handle many common objects:
