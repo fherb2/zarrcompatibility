@@ -5,6 +5,11 @@ on:
     branches: [ main ]
   workflow_dispatch:  # Ermöglicht auch manuelles Triggern
 
+# Verhindert parallele Ausführungen
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pages: write
