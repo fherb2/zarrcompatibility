@@ -157,6 +157,27 @@ metadata.save_to_zarr_group(group, "metadata")
 | **Regular Classes** | Any custom class | Attribute dictionary |
 | **Binary Data** | `bytes` | Base64 encoding |
 
+## Automatic Tuple Preservation 
+
+zarrcompatibility now automatically preserves Python tuple types through JSON serialization:
+
+```python
+import zarrcompatibility as zc
+import zarr
+
+# Enable universal serialization with automatic tuple preservation
+zc.enable_universal_serialization()
+
+# Tuples are now preserved in Zarr metadata!
+group = zarr.open_group("data.zarr", mode="w")
+group.attrs["version"] = (1, 0)        # Stored as tuple
+group.attrs["coordinates"] = (10, 20)  # Stored as tuple
+
+# Later: no manual conversion needed
+reloaded = zarr.open_group("data.zarr", mode="r")
+version = reloaded.attrs["version"]     # (1, 0) - still a tuple!
+assert version == (1, 0)               # Works directly!
+
 ## Scientific Computing Examples
 
 ### Storing ML Model Metadata

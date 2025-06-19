@@ -7,7 +7,7 @@ making them compatible with Zarr and other systems that require JSON serializati
 ## Key Features:
 
 * Works with ANY Python class (dataclasses, regular classes, enums)
-* Automatic serialization/deserialization
+* Automatic serialization/deserialization with tuple preservation
 * Zarr-compatible out of the box
 * No class modification required (optional enhancements available)
 * Single import and setup
@@ -26,12 +26,13 @@ Author: F. Herbrand
 License: MIT
 """
 
+import base64
 import json
-from dataclasses import is_dataclass, asdict
-from datetime import datetime, date, time
-from enum import Enum
-from typing import Any, Dict, Optional, Type
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime, time
 from decimal import Decimal
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 from uuid import UUID
 
 
@@ -116,7 +117,6 @@ def serialize_object(obj: Any) -> Any:
         return str(obj)
     elif isinstance(obj, bytes):
         # Convert bytes to base64 string
-        import base64
         return base64.b64encode(obj).decode('ascii')
     elif isinstance(obj, complex):
         return {'real': obj.real, 'imag': obj.imag, '_type': 'complex'}
@@ -206,7 +206,7 @@ def deserialize_object(data: Any, target_class: Optional[Type] = None) -> Any:
                 else:
                     # Try constructor with kwargs
                     return target_class(**data)
-            except Exception as e:
+            except Exception:
                 # If construction fails, return the dict
                 pass
         
@@ -221,61 +221,138 @@ def deserialize_object(data: Any, target_class: Optional[Type] = None) -> Any:
 # =============================================================================
 
 class UniversalJSONEncoder(json.JSONEncoder):
-    """
-    Universal JSON encoder that can handle any Python object.
+    """Universal JSON encoder that handles tuples and other Python objects."""
     
-    This encoder automatically serializes complex objects using the
-    serialize_object function.
-    """
+    def encode(self, obj: Any) -> str:
+        """Override encode to handle nested tuples and complex objects."""
+        converted_obj = self._convert_tuples_recursive(obj)
+        return super().encode(converted_obj)
     
-    def default(self, obj):
-        """Override default method to handle complex objects."""
+    def _convert_tuples_recursive(self, obj: Any) -> Any:
+        """Recursively convert tuples to type-preserved dictionaries."""
+        if isinstance(obj, tuple):
+            return {"__type__": "tuple", "__data__": list(obj)}
+        elif isinstance(obj, dict):
+            return {key: self._convert_tuples_recursive(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_tuples_recursive(item) for item in obj]
+        else:
+            # For other complex objects, use existing serialization logic
+            return serialize_object(obj)
+    
+    def default(self, obj: Any) -> Any:
+        """Fallback for objects that couldn't be handled by encode."""
         return serialize_object(obj)
 
-
-# Global reference to original JSONEncoder.default for restoration
-_original_json_default = None
-
-
-def enable_universal_serialization():
-    """
-    Enable universal JSON serialization globally.
-    
-    This patches the standard json.JSONEncoder.default method to automatically
-    handle complex objects. After calling this function, json.dumps() will work
-    with any Python object.
-    
-    This is safe to call multiple times.
-    
-    Example:
-        import zarrcompatibility as zc
-        zc.enable_universal_serialization()
+def universal_object_hook(data: Any) -> Any:
+    """Object hook that restores tuples and other Python objects."""
+    if isinstance(data, dict):
+        # Restore tuples
+        if data.get("__type__") == "tuple" and "__data__" in data:
+            return tuple(data["__data__"])
         
-        # Now json.dumps() works with any object
-        json.dumps(my_complex_object)
-    """
-    global _original_json_default
+        # Process nested structures
+        return {key: universal_object_hook(value) for key, value in data.items()}
     
-    # Store original if not already stored
-    if _original_json_default is None:
-        _original_json_default = json.JSONEncoder.default
+    elif isinstance(data, list):
+        return [universal_object_hook(item) for item in data]
     
-    # Patch the default method
-    json.JSONEncoder.default = lambda self, obj: serialize_object(obj)
-    
-    print("Universal JSON serialization enabled globally!")
+    return data
 
 
-def disable_universal_serialization():
+# Global reference to original JSON functions for restoration
+_original_json_default: Optional[Callable] = None
+
+
+def enable_universal_serialization() -> None:
+    """Enable universal JSON serialization with automatic tuple preservation."""
+    
+    # Store originals for potential restoration
+    if not hasattr(json, '_original_dumps'):
+        json._original_dumps = json.dumps
+        json._original_loads = json.loads
+    
+    def enhanced_dumps(obj: Any, cls: Optional[Type[json.JSONEncoder]] = None, **kwargs: Any) -> str:
+        if cls is None:
+            cls = UniversalJSONEncoder
+        return json._original_dumps(obj, cls=cls, **kwargs)
+    
+    def enhanced_loads(s: str, object_hook: Optional[Callable[[Dict[str, Any]], Any]] = None, **kwargs: Any) -> Any:
+        if object_hook is None:
+            object_hook = universal_object_hook
+        return json._original_loads(s, object_hook=object_hook, **kwargs)
+    
+    # Patch JSON module
+    json.dumps = enhanced_dumps
+    json.loads = enhanced_loads
+    
+    # PATCH ZARR'S METADATA SERIALIZATION for tuple preservation
+    try:
+        import zarr.core.metadata.v3
+        
+        # Patch ArrayV3Metadata.to_buffer_dict
+        original_to_buffer_dict = zarr.core.metadata.v3.ArrayV3Metadata.to_buffer_dict
+        
+        def enhanced_to_buffer_dict(self, prototype):
+            # Get the original dict
+            d = self.to_dict()
+            
+            # Convert tuples recursively before JSON encoding
+            def convert_tuples(obj):
+                if isinstance(obj, tuple):
+                    return {"__type__": "tuple", "__data__": list(obj)}
+                elif isinstance(obj, dict):
+                    return {k: convert_tuples(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_tuples(item) for item in obj]
+                else:
+                    return obj
+            
+            d_converted = convert_tuples(d)
+            
+            # Apply special floats replacement and encode
+            from zarr.core.metadata.v3 import _replace_special_floats, ZARR_JSON, V3JsonEncoder
+            d_final = _replace_special_floats(d_converted)
+            
+            return {ZARR_JSON: prototype.buffer.from_bytes(json.dumps(d_final, cls=V3JsonEncoder).encode())}
+        
+        zarr.core.metadata.v3.ArrayV3Metadata.to_buffer_dict = enhanced_to_buffer_dict
+        
+        # Also patch GroupMetadata if it exists (for groups)
+        if hasattr(zarr.core.metadata.v3, 'GroupV3Metadata'):
+            zarr.core.metadata.v3.GroupV3Metadata.to_buffer_dict = enhanced_to_buffer_dict
+        
+    except ImportError:
+        # Zarr not available or different version
+        pass
+
+    # PATCH ZARR'S METADATA SERIALIZATION for tuple preservation
+    try:
+        import zarr.core.metadata.v3
+        
+        # ... (bestehender ArrayV3Metadata Patch) ...
+        
+        # HIER HINZUFÜGEN:
+        # Also patch GroupMetadata for groups
+        import zarr.core.group
+        if hasattr(zarr.core.group, 'GroupMetadata'):
+            zarr.core.group.GroupMetadata.to_buffer_dict = enhanced_to_buffer_dict
+        
+    except ImportError:
+        # Zarr not available or different version
+        pass
+
+def disable_universal_serialization() -> None:
     """
     Disable universal JSON serialization and restore original behavior.
     
-    This restores the original json.JSONEncoder.default method.
+    This restores the original json.dumps and json.loads functions.
     """
-    global _original_json_default
-    
-    if _original_json_default:
-        json.JSONEncoder.default = _original_json_default
+    if hasattr(json, '_original_dumps'):
+        json.dumps = json._original_dumps
+        json.loads = json._original_loads
+        delattr(json, '_original_dumps')
+        delattr(json, '_original_loads')
         print("Universal JSON serialization disabled, original behavior restored.")
     else:
         print("Warning: Universal serialization was not enabled.")
@@ -309,12 +386,11 @@ class JSONSerializable:
         from_json(): Class method to create instance from JSON string
     """
     
-    def __json__(self):
+    def __json__(self) -> Dict[str, Any]:
         """Return JSON-serializable representation."""
-        # Use to_dict() instead of serialize_object to ensure dict output
         return self.to_dict()
     
-    def to_dict(self):
+    def to_dict(self) -> Dict[str, Any]:
         """
         Convert object to dictionary.
         
@@ -325,7 +401,6 @@ class JSONSerializable:
         Returns:
             Dict representation of the object
         """
-        # Direct approach: extract attributes without over-serialization
         if hasattr(self, '__dict__'):
             result = {}
             for key, value in self.__dict__.items():
@@ -338,7 +413,7 @@ class JSONSerializable:
             return result
         return {}
     
-    def to_json(self, **kwargs):
+    def to_json(self, **kwargs: Any) -> str:
         """
         Convert object to JSON string.
         
@@ -351,12 +426,11 @@ class JSONSerializable:
         Returns:
             JSON string representation of the object
         """
-        # Get the dict representation first, then serialize that
         dict_repr = self.to_dict()
         return json.dumps(dict_repr, **kwargs)
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
+    def from_dict(cls, data: Dict[str, Any]) -> Any:
         """
         Create instance from dictionary.
         
@@ -390,7 +464,7 @@ class JSONSerializable:
                 return result
     
     @classmethod
-    def from_json(cls, json_str: str):
+    def from_json(cls, json_str: str) -> Any:
         """Create instance from JSON string."""
         data = json.loads(json_str)
         return cls.from_dict(data)
@@ -426,7 +500,7 @@ class ZarrCompatible(JSONSerializable):
         return self.to_dict()
     
     @classmethod
-    def from_zarr_attrs(cls, attrs: Dict[str, Any]):
+    def from_zarr_attrs(cls, attrs: Dict[str, Any]) -> Any:
         """
         Create instance from Zarr attributes dictionary.
         
@@ -438,7 +512,7 @@ class ZarrCompatible(JSONSerializable):
         """
         return cls.from_dict(attrs)
     
-    def save_to_zarr_group(self, zarr_group, attr_name: str = 'metadata'):
+    def save_to_zarr_group(self, zarr_group: Any, attr_name: str = 'metadata') -> None:
         """
         Save this object to a Zarr group as attributes.
         
@@ -446,12 +520,11 @@ class ZarrCompatible(JSONSerializable):
             zarr_group: Zarr group object
             attr_name: Name of the attribute to store this object under
         """
-        # Convert to dict and store
         attrs_dict = self.to_zarr_attrs()
         zarr_group.attrs[attr_name] = attrs_dict
     
     @classmethod
-    def load_from_zarr_group(cls, zarr_group, attr_name: str = 'metadata'):
+    def load_from_zarr_group(cls, zarr_group: Any, attr_name: str = 'metadata') -> Any:
         """
         Load this object from a Zarr group's attributes.
         
@@ -466,6 +539,8 @@ class ZarrCompatible(JSONSerializable):
         Returns:
             Instance of this class
         """
+        import inspect
+        
         attrs = zarr_group.attrs[attr_name]
         
         # Handle different cases of what might be stored
@@ -476,7 +551,6 @@ class ZarrCompatible(JSONSerializable):
             # Dictionary - construct object directly
             try:
                 # Get constructor parameters
-                import inspect
                 sig = inspect.signature(cls.__init__)
                 valid_params = list(sig.parameters.keys())
                 valid_params.remove('self')  # Remove 'self' parameter
@@ -485,13 +559,11 @@ class ZarrCompatible(JSONSerializable):
                 filtered_attrs = {k: v for k, v in attrs.items() if k in valid_params}
                 
                 # Try direct construction with filtered dict
-                result = cls(**filtered_attrs)
-                return result
-            except Exception as e:
+                return cls(**filtered_attrs)
+            except Exception:
                 try:
-                    result = cls.from_zarr_attrs(attrs)
-                    return result
-                except Exception as e2:
+                    return cls.from_zarr_attrs(attrs)
+                except Exception:
                     return attrs
         else:
             # Try to convert whatever we have to dict first
@@ -499,9 +571,8 @@ class ZarrCompatible(JSONSerializable):
                 attrs_dict = {key: value for key, value in attrs.__dict__.items() 
                              if not key.startswith('_') and not callable(value)}
                 try:
-                    result = cls(**attrs_dict)
-                    return result
-                except Exception as e:
+                    return cls(**attrs_dict)
+                except Exception:
                     return cls.from_zarr_attrs(attrs_dict)
             else:
                 return attrs
@@ -539,8 +610,7 @@ def make_serializable(cls: Type) -> Type:
     cls.__json__ = lambda self: serialize_object(self)
     
     # Add to_dict method
-    def to_dict_method(self):
-        # Direct approach: extract attributes without over-serialization
+    def to_dict_method(self) -> Dict[str, Any]:
         if hasattr(self, '__dict__'):
             result = {}
             for key, value in self.__dict__.items():
@@ -555,14 +625,14 @@ def make_serializable(cls: Type) -> Type:
     cls.to_dict = to_dict_method
     
     # Add to_json method - use dict representation to avoid double serialization
-    def to_json_method(self, **kwargs):
+    def to_json_method(self, **kwargs: Any) -> str:
         dict_repr = self.to_dict()
         return json.dumps(dict_repr, **kwargs)
     cls.to_json = to_json_method
     
     # Add from_dict class method
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
+    def from_dict(cls, data: Dict[str, Any]) -> Any:
         if not isinstance(data, dict):
             return data
             
@@ -585,7 +655,7 @@ def make_serializable(cls: Type) -> Type:
     
     # Add from_json class method
     @classmethod
-    def from_json(cls, json_str: str):
+    def from_json(cls, json_str: str) -> Any:
         data = json.loads(json_str)
         return cls.from_dict(data)
     cls.from_json = from_json
@@ -680,8 +750,6 @@ if __name__ == "__main__":
     enable_universal_serialization()
     
     # Test with various object types
-    from enum import Enum
-    from datetime import datetime
     from dataclasses import dataclass
     
     # Test enum
@@ -691,7 +759,7 @@ if __name__ == "__main__":
     
     # Test regular class
     class RegularClass:
-        def __init__(self, name, value):
+        def __init__(self, name: str, value: int) -> None:
             self.name = name
             self.value = value
     
@@ -703,17 +771,18 @@ if __name__ == "__main__":
     
     # Test with mixin
     class MixinClass(JSONSerializable):
-        def __init__(self, data):
+        def __init__(self, data: Dict[str, Any]) -> None:
             self.data = data
     
     # Run tests
-    test_objects = [
+    test_objects: List[Any] = [
         Status.READY,
         RegularClass("test", 42),
         DataClass("example", 100),
         MixinClass({"nested": "data"}),
         datetime.now(),
         [1, 2, {"key": "value"}],
+        (1, 0),  # Test tuple preservation
     ]
     
     for obj in test_objects:
@@ -721,5 +790,3 @@ if __name__ == "__main__":
         print()
     
     print("All tests completed!")
-    
-    
