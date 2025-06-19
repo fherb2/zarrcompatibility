@@ -59,6 +59,8 @@ def patch_zarr_util_json() -> None:
     AttributeError
         If expected Zarr functions are not found (API change)
     """
+    global _zarr_patching_active
+    
     try:
         import zarr.util
     except ImportError as e:
@@ -105,6 +107,7 @@ def patch_zarr_util_json() -> None:
     zarr.util.json_dumps = enhanced_zarr_json_dumps
     zarr.util.json_loads = enhanced_zarr_json_loads
     
+    _zarr_patching_active = True
     print("✅ Patched zarr.util.json_dumps and zarr.util.json_loads")
 
 
@@ -442,30 +445,3 @@ def validate_zarr_patches() -> bool:
     except Exception as e:
         print(f"❌ Zarr patch validation failed: {e}")
         return False
-
-
-# Mark patching as active when functions are patched
-def _set_patching_active():
-    """Mark patching as active (internal function)."""
-    global _zarr_patching_active
-    _zarr_patching_active = True
-
-
-# Hook to mark patching active after successful patches
-def patch_zarr_util_json():
-    """Patch zarr.util functions and mark as active."""
-    # Call the original function
-    globals()['patch_zarr_util_json'].__wrapped__()
-    _set_patching_active()
-
-
-def patch_zarr_v3_metadata():
-    """Patch zarr v3 metadata and mark as active.""" 
-    # Call the original function
-    globals()['patch_zarr_v3_metadata'].__wrapped__()
-    _set_patching_active()
-
-
-# Store original functions for wrapping
-patch_zarr_util_json.__wrapped__ = patch_zarr_util_json
-patch_zarr_v3_metadata.__wrapped__ = patch_zarr_v3_metadata
