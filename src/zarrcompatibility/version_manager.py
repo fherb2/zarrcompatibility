@@ -320,7 +320,7 @@ def validate_zarr_version() -> None:
         # Provide helpful error message based on the issue
         if "below minimum" in reason:
             raise ImportError(
-                f"Zarr v{zarr_version} is too old. zarrcompatibility v2.1 requires Zarr v3.0+.\n"
+                f"Zarr v{zarr_version} is too old. zarrcompatibility v3.0 requires Zarr v3.0+.\n"
                 f"Zarr v2 is not supported. Please upgrade: {recommendation['command']}"
             )
         elif "above max tested" in reason:

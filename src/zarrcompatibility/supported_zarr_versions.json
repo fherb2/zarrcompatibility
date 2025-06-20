@@ -53,5 +53,6 @@
     "auto_update_enabled": true,
     "ci_check_frequency": "monthly",
     "next_check_date": "2025-02-19"
-  }
+  },
+  "zarrcompatibility_version": "3.0.0"
 }

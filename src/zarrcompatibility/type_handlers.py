@@ -1,32 +1,10 @@
 """
 Type serialization and deserialization handlers for zarrcompatibility.
 
-This module provides specialized handlers for converting Python objects to
-JSON-compatible representations and back. Each type handler is responsible
-for safely converting objects to/from JSON while preserving their semantic
-meaning and type information.
+FIXED VERSION - Added Zarr internal object detection to prevent over-serialization.
 
-The module includes handlers for:
-    - Tuples (main feature - preserved as tuples)
-    - Datetime objects (ISO format strings)
-    - Enums (value extraction and restoration)
-    - UUIDs (string representation)
-    - Dataclasses (field dictionaries)
-    - Complex numbers (real/imaginary dicts)
-    - Binary data (base64 encoding)
-    - Decimal numbers (string representation)
-
-Key Functions:
-    - serialize_object(): Convert any object to JSON-compatible form
-    - deserialize_object(): Restore objects from JSON-compatible form
-    - register_type_handler(): Add custom type handlers
-    - get_supported_types(): List all supported types
-
-Design Principles:
-    - Type preservation: Objects roundtrip to their original type
-    - Safety: Invalid data doesn't crash the deserializer
-    - Extensibility: Easy to add new type handlers
-    - Performance: Minimal overhead for supported types
+This version adds a critical fix: we now detect and skip Zarr-internal objects
+like DataType enums, which should remain untouched by our enhanced serialization.
 
 Author: F. Herbrand
 License: MIT
@@ -38,7 +16,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union, Tuple
 from uuid import UUID
 
 
@@ -48,77 +26,82 @@ TUPLE_DATA_MARKER = "__data__"
 TUPLE_TYPE_VALUE = "tuple"
 
 
-class TypeHandler:
+def is_zarr_internal_object(obj: Any) -> bool:
     """
-    Base class for type serialization handlers.
+    Check if an object is a Zarr-internal type that should NOT be enhanced.
     
-    Each type handler is responsible for detecting, serializing, and
-    deserializing a specific Python type. Handlers are registered
-    with the serialization system and applied in order.
+    This function is VERY PRECISE to avoid blocking user enums and types.
+    Only objects that are genuinely part of Zarr's internal machinery are blocked.
+    
+    CRITICAL: User enums (even if named "DataType") must NOT be blocked!
+    
+    Parameters
+    ----------
+    obj : any
+        Object to check
+        
+    Returns
+    -------
+    bool
+        True if this is a Zarr-internal object that should not be enhanced
     """
+    # Get the object's class module
+    obj_class = type(obj)
+    obj_module = getattr(obj_class, '__module__', '')
+    obj_class_name = obj_class.__name__
+    
+    # PRECISE CHECK: Only block objects that are SPECIFICALLY from Zarr's internal modules
+    # and have the exact problematic combinations
+    
+    # Block zarr.core.metadata.v3.DataType specifically (the original culprit)
+    if obj_module == 'zarr.core.metadata.v3' and obj_class_name == 'DataType':
+        return True
+    
+    # Block other specific Zarr internal metadata objects
+    zarr_internal_combinations = [
+        ('zarr.core.metadata.v3', 'ArrayV3Metadata'),
+        ('zarr.core.group', 'GroupMetadata'),
+        ('zarr.core.buffer', 'Buffer'),
+        ('zarr.core.store', 'Store'),
+        ('zarr.core.chunk_grids', 'ChunkGrid'),
+        ('zarr.core.chunk_key_encodings', 'ChunkKeyEncoding'),
+        ('zarr.core.codecs', 'Codec'),
+        ('zarr.core.metadata', 'ArrayMetadata'),
+        ('zarr.core.chunk_grids', 'ChunkManifest'),
+        ('zarr.core.indexing', 'Selection'),
+    ]
+    
+    for module_pattern, class_pattern in zarr_internal_combinations:
+        if obj_module == module_pattern and obj_class_name == class_pattern:
+            return True
+    
+    # Block NumPy dtypes and related objects (they have their own serialization)
+    if obj_module and obj_module.startswith('numpy') and obj_class_name in ['dtype', 'ndarray']:
+        return True
+    
+    # DO NOT block anything else - especially not user enums, user dataclasses, etc.
+    # User objects should always be enhanced, regardless of their names
+    
+    return False
+
+
+class TypeHandler:
+    """Base class for type serialization handlers."""
     
     def can_handle(self, obj: Any) -> bool:
-        """
-        Check if this handler can process the given object.
-        
-        Parameters
-        ----------
-        obj : any
-            Object to check
-            
-        Returns
-        -------
-        bool
-            True if this handler can process the object
-        """
+        """Check if this handler can process the given object."""
         raise NotImplementedError("Subclasses must implement can_handle()")
     
     def serialize(self, obj: Any) -> Any:
-        """
-        Convert object to JSON-compatible representation.
-        
-        Parameters
-        ----------
-        obj : any
-            Object to serialize
-            
-        Returns
-        -------
-        any
-            JSON-compatible representation
-        """
+        """Convert object to JSON-compatible representation."""
         raise NotImplementedError("Subclasses must implement serialize()")
     
     def can_deserialize(self, data: Any) -> bool:
-        """
-        Check if this handler can deserialize the given data.
-        
-        Parameters
-        ----------
-        data : any
-            JSON data to check
-            
-        Returns
-        -------
-        bool
-            True if this handler can deserialize the data
-        """
+        """Check if this handler can deserialize the given data."""
         raise NotImplementedError("Subclasses must implement can_deserialize()")
     
     def deserialize(self, data: Any) -> Any:
-        """
-        Convert JSON-compatible data back to original object.
-        
-        Parameters
-        ----------
-        data : any
-            JSON-compatible data
-            
-        Returns
-        -------
-        any
-            Restored Python object
-        """
+        """Convert JSON-compatible data back to original object."""
         raise NotImplementedError("Subclasses must implement deserialize()")
 
 
@@ -129,10 +112,12 @@ class TupleHandler(TypeHandler):
         return isinstance(obj, tuple)
     
     def serialize(self, obj: tuple) -> Dict[str, Any]:
-        """Convert tuple to type-preserved dict."""
+        """Convert tuple to type-preserved dict with recursive serialization."""
+        # Recursively serialize tuple elements
+        serialized_data = [serialize_object(item) for item in obj]
         return {
             TUPLE_TYPE_MARKER: TUPLE_TYPE_VALUE,
-            TUPLE_DATA_MARKER: list(obj)
+            TUPLE_DATA_MARKER: serialized_data
         }
     
     def can_deserialize(self, data: Any) -> bool:
@@ -143,8 +128,10 @@ class TupleHandler(TypeHandler):
         )
     
     def deserialize(self, data: Dict[str, Any]) -> tuple:
-        """Restore tuple from type-preserved dict."""
-        return tuple(data[TUPLE_DATA_MARKER])
+        """Restore tuple from type-preserved dict with recursive deserialization."""
+        # Recursively deserialize tuple elements
+        deserialized_data = [deserialize_object(item) for item in data[TUPLE_DATA_MARKER]]
+        return tuple(deserialized_data)
 
 
 class DateTimeHandler(TypeHandler):
@@ -185,10 +172,11 @@ class DateTimeHandler(TypeHandler):
 
 
 class EnumHandler(TypeHandler):
-    """Handler for Enum objects."""
+    """Handler for Enum objects - but only user enums, not Zarr internal ones."""
     
     def can_handle(self, obj: Any) -> bool:
-        return isinstance(obj, Enum)
+        # Only handle user enums, not Zarr internal ones
+        return isinstance(obj, Enum) and not is_zarr_internal_object(obj)
     
     def serialize(self, obj: Enum) -> Dict[str, Any]:
         """Convert enum to value with type info."""
@@ -208,17 +196,13 @@ class EnumHandler(TypeHandler):
     
     def deserialize(self, data: Dict[str, Any]) -> Enum:
         """Restore enum from value and class info."""
-        try:
-            # Import the enum class
-            module_name, class_name = data["__class__"].rsplit(".", 1)
-            module = __import__(module_name, fromlist=[class_name])
-            enum_class = getattr(module, class_name)
-            
-            # Create enum instance from value
-            return enum_class(data["__data__"])
-        except Exception as e:
-            # Fallback: return just the value if enum class can't be imported
-            return data["__data__"]
+        # Import the enum class
+        module_name, class_name = data["__class__"].rsplit(".", 1)
+        module = __import__(module_name, fromlist=[class_name])
+        enum_class = getattr(module, class_name)
+        
+        # Create enum instance from value
+        return enum_class(data["__data__"])
 
 
 class UUIDHandler(TypeHandler):
@@ -253,11 +237,14 @@ class DataclassHandler(TypeHandler):
         return is_dataclass(obj) and not isinstance(obj, type)
     
     def serialize(self, obj: Any) -> Dict[str, Any]:
-        """Convert dataclass to dict with type info."""
+        """Convert dataclass to dict with type info and recursive serialization."""
+        raw_data = asdict(obj)
+        serialized_data = serialize_object(raw_data)
+        
         return {
             "__type__": "dataclass",
             "__class__": f"{obj.__class__.__module__}.{obj.__class__.__qualname__}",
-            "__data__": asdict(obj)
+            "__data__": serialized_data
         }
     
     def can_deserialize(self, data: Any) -> bool:
@@ -269,18 +256,17 @@ class DataclassHandler(TypeHandler):
         )
     
     def deserialize(self, data: Dict[str, Any]) -> Any:
-        """Restore dataclass from dict and class info."""
-        try:
-            # Import the dataclass
-            module_name, class_name = data["__class__"].rsplit(".", 1)
-            module = __import__(module_name, fromlist=[class_name])
-            dataclass_type = getattr(module, class_name)
-            
-            # Create instance from dict
-            return dataclass_type(**data["__data__"])
-        except Exception:
-            # Fallback: return just the data dict
-            return data["__data__"]
+        """Restore dataclass from dict and class info with recursive deserialization."""
+        # Import the dataclass
+        module_name, class_name = data["__class__"].rsplit(".", 1)
+        module = __import__(module_name, fromlist=[class_name])
+        dataclass_type = getattr(module, class_name)
+        
+        # Recursively deserialize the data first
+        deserialized_data = deserialize_object(data["__data__"])
+        
+        # Create instance from dict
+        return dataclass_type(**deserialized_data)
 
 
 class ComplexHandler(TypeHandler):
@@ -375,16 +361,7 @@ _TYPE_HANDLERS: List[TypeHandler] = [
 
 
 def register_type_handler(handler: TypeHandler, priority: int = 0) -> None:
-    """
-    Register a custom type handler.
-    
-    Parameters
-    ----------
-    handler : TypeHandler
-        The type handler to register
-    priority : int, default 0
-        Priority for handler (higher = checked first)
-    """
+    """Register a custom type handler."""
     if priority > 0:
         _TYPE_HANDLERS.insert(0, handler)
     else:
@@ -396,46 +373,38 @@ def serialize_object(obj: Any) -> Any:
     Serialize an object to JSON-compatible form using registered handlers.
     
     This function tries to find an appropriate type handler for the object.
-    If no handler is found, it falls back to basic JSON types or returns
-    the object unchanged for JSON-compatible types.
+    If no handler is found, it falls back to basic JSON types or collections.
     
-    Parameters
-    ----------
-    obj : any
-        Object to serialize
-        
-    Returns
-    -------
-    any
-        JSON-compatible representation of the object
+    CRITICAL FIX: Now checks for Zarr-internal objects first and skips them.
     """
     # Handle basic JSON types first
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
     
-    # Try registered type handlers
+    # CRITICAL FIX: Skip Zarr-internal objects that should NOT be enhanced
+    # These are Zarr's internal types that must remain untouched
+    if is_zarr_internal_object(obj):
+        return obj
+    
+    # Try registered type handlers first (BEFORE collections)
     for handler in _TYPE_HANDLERS:
         if handler.can_handle(obj):
-            try:
-                return handler.serialize(obj)
-            except Exception:
-                # If handler fails, continue to next one
-                continue
+            return handler.serialize(obj)
     
-    # Handle collections recursively
+    # Handle collections recursively AFTER type handlers
     if isinstance(obj, dict):
         return {key: serialize_object(value) for key, value in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        # Note: tuples should be handled by TupleHandler above
+    elif isinstance(obj, list):
         return [serialize_object(item) for item in obj]
+    elif isinstance(obj, tuple):
+        # This should have been handled by TupleHandler above
+        # If we reach here, something is wrong with the handler registration
+        raise RuntimeError(f"Tuple {obj} was not handled by TupleHandler - handler registration issue!")
     elif isinstance(obj, set):
         return {"__type__": "set", "__data__": [serialize_object(item) for item in obj]}
     
-    # Fallback: try to convert to string
-    try:
-        return str(obj)
-    except Exception:
-        return f"<Unserializable: {type(obj).__name__}>"
+    # Fallback for unknown types
+    return str(obj)
 
 
 def deserialize_object(data: Any) -> Any:
@@ -443,32 +412,17 @@ def deserialize_object(data: Any) -> Any:
     Deserialize JSON-compatible data back to Python objects using registered handlers.
     
     This function tries to find an appropriate type handler that can deserialize
-    the data. If no handler is found, it returns the data as-is or processes
-    it recursively if it's a collection.
-    
-    Parameters
-    ----------
-    data : any
-        JSON-compatible data to deserialize
-        
-    Returns
-    -------
-    any
-        Restored Python object
+    the data. If no handler is found, it processes collections recursively.
     """
     # Handle basic JSON types
     if data is None or isinstance(data, (str, int, float, bool)):
         return data
     
-    # Try registered type handlers
+    # Try registered type handlers first (BEFORE collections)
     if isinstance(data, dict):
         for handler in _TYPE_HANDLERS:
             if handler.can_deserialize(data):
-                try:
-                    return handler.deserialize(data)
-                except Exception:
-                    # If handler fails, continue to next one
-                    continue
+                return handler.deserialize(data)
         
         # Handle set type
         if data.get("__type__") == "set" and "__data__" in data:
@@ -485,14 +439,7 @@ def deserialize_object(data: Any) -> Any:
 
 
 def get_supported_types() -> List[str]:
-    """
-    Get list of supported types for serialization.
-    
-    Returns
-    -------
-    list of str
-        List of type names that can be serialized
-    """
+    """Get list of supported types for serialization."""
     return [
         "tuple", "datetime", "date", "time", "enum", "uuid", 
         "dataclass", "complex", "bytes", "decimal", "set"
@@ -500,21 +447,7 @@ def get_supported_types() -> List[str]:
 
 
 def test_type_roundtrip(obj: Any, verbose: bool = False) -> bool:
-    """
-    Test if an object can roundtrip through serialization successfully.
-    
-    Parameters
-    ----------
-    obj : any
-        Object to test
-    verbose : bool, default False
-        If True, print detailed test information
-        
-    Returns
-    -------
-    bool
-        True if roundtrip successful, False otherwise
-    """
+    """Test if an object can roundtrip through serialization successfully."""
     try:
         # Serialize
         serialized = serialize_object(obj)
@@ -541,3 +474,120 @@ def test_type_roundtrip(obj: Any, verbose: bool = False) -> bool:
         if verbose:
             print(f"Type roundtrip test failed for {type(obj).__name__}: {e}")
         return False
+
+
+def print_type_handler_status() -> None:
+    """Print status information about all registered type handlers."""
+    print("🔧 Type Handler Status Report")
+    print("=" * 40)
+    
+    print(f"📊 Total handlers registered: {len(_TYPE_HANDLERS)}")
+    print()
+    
+    print("📋 Registered Type Handlers:")
+    for i, handler in enumerate(_TYPE_HANDLERS, 1):
+        handler_name = handler.__class__.__name__
+        print(f"   {i}. {handler_name}")
+    
+    print()
+    print("✅ Supported Types:")
+    for type_name in get_supported_types():
+        print(f"   - {type_name}")
+    
+    print()
+    print("💡 To test a specific type:")
+    print("   from zarrcompatibility.type_handlers import test_type_roundtrip")
+    print("   test_type_roundtrip(your_object, verbose=True)")
+
+
+def debug_serialization(obj: Any) -> Tuple[Optional[Any], Optional[Any]]:
+    """Debug function to trace serialization process."""
+    print(f"\n🔍 DEBUG: Serializing {type(obj).__name__}: {obj!r}")
+    
+    # Check if it's a Zarr internal object
+    if is_zarr_internal_object(obj):
+        print(f"   🚫 ZARR INTERNAL OBJECT - skipping enhancement")
+        print(f"   Module: {type(obj).__module__}")
+        print(f"   Class: {type(obj).__name__}")
+        return obj, obj
+    
+    # Check which handler will be used
+    handler_found: Optional[TypeHandler] = None
+    for i, handler in enumerate(_TYPE_HANDLERS):
+        if handler.can_handle(obj):
+            handler_found = handler
+            print(f"   Handler: {handler.__class__.__name__} (index {i})")
+            break
+    
+    if not handler_found:
+        print(f"   Handler: None - will use fallback logic")
+    
+    # Test serialization
+    try:
+        serialized = serialize_object(obj)
+        print(f"   Serialized: {serialized!r}")
+        
+        # Test deserialization
+        deserialized = deserialize_object(serialized)
+        print(f"   Deserialized: {deserialized!r}")
+        print(f"   Type match: {type(obj) == type(deserialized)}")
+        print(f"   Value match: {obj == deserialized}")
+        
+        return serialized, deserialized
+        
+    except Exception as e:
+        print(f"   ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
+
+
+def test_zarr_internal_detection() -> None:
+    """Test the Zarr internal object detection functionality."""
+    print("🧪 Testing Zarr Internal Object Detection")
+    print("=" * 50)
+    
+    test_cases = []
+    
+    # Try to import and test Zarr types
+    try:
+        from zarr.core.metadata.v3 import DataType
+        test_cases.append(("DataType.float32", DataType.float32))
+    except ImportError:
+        print("   ⚠️  Could not import zarr.core.metadata.v3.DataType")
+    
+    # Test user types (should NOT be detected as Zarr internal)
+    from enum import Enum
+    from datetime import datetime
+    
+    class UserEnum(Enum):
+        TEST = "test"
+    
+    test_cases.extend([
+        ("UserEnum.TEST", UserEnum.TEST),
+        ("datetime.now()", datetime.now()),
+        ("tuple", (1, 2, 3)),
+        ("string", "hello"),
+        ("int", 42),
+    ])
+    
+    for name, obj in test_cases:
+        is_internal = is_zarr_internal_object(obj)
+        obj_module = getattr(type(obj), '__module__', 'unknown')
+        obj_class = type(obj).__name__
+        
+        status = "🚫 INTERNAL" if is_internal else "✅ USER TYPE"
+        print(f"   {status}: {name}")
+        print(f"      Module: {obj_module}")
+        print(f"      Class: {obj_class}")
+        print(f"      Value: {obj!r}")
+        print()
+    
+    print("✅ Zarr internal object detection test completed")
+
+
+if __name__ == "__main__":
+    # Run tests when module is executed directly
+    test_zarr_internal_detection()
+    print()
+    print_type_handler_status()

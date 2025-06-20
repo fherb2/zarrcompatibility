@@ -305,7 +305,7 @@ def print_compatibility_report() -> None:
     This function runs tests on all supported types and prints a formatted
     report showing which types work correctly and which have issues.
     """
-    print("🧪 zarrcompatibility Serialization Compatibility Report")
+    print("🧪 zarrcompatibility v3.0 Serialization Compatibility Report")
     print("=" * 60)
     
     results = test_json_compatibility()

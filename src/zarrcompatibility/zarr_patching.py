@@ -1,19 +1,22 @@
 """
 Zarr-specific patching functions for zarrcompatibility.
 
+FIXED VERSION - Now correctly patches GroupMetadata.to_buffer_dict 
+where the actual JSON serialization happens.
+
 This module contains the core patching logic that modifies Zarr's internal
-JSON serialization methods to support additional Python types. Unlike the
-old approach that patched the global json module, this module only patches
-Zarr-specific functions, ensuring zero side effects on other libraries.
+JSON serialization methods to support additional Python types. This version
+targets Zarr v3's V3JsonEncoder class and metadata handling methods.
 
 The module patches these key Zarr components:
-    - zarr.util.json_dumps and json_loads (core JSON functions)
-    - ArrayV3Metadata.to_buffer_dict and from_dict (array metadata)
-    - GroupV3Metadata.to_buffer_dict and from_dict (group metadata)
+    - zarr.core.metadata.v3.V3JsonEncoder (core JSON encoder class)
+    - GroupMetadata.to_buffer_dict (where JSON serialization actually happens!)
+    - GroupMetadata.from_dict (group metadata deserialization)
+    - ArrayV3Metadata.from_dict (array metadata deserialization)
 
 Key Functions:
-    - patch_zarr_util_json(): Patch Zarr's core JSON utilities
-    - patch_zarr_v3_metadata(): Patch Zarr v3 metadata serialization methods
+    - patch_v3_json_encoder(): Patch Zarr's JSON encoder class
+    - patch_zarr_v3_json_loading(): Patch metadata loading for type restoration
     - restore_original_zarr_functions(): Restore original Zarr behavior
     - is_zarr_patched(): Check if patching is active
 
@@ -44,208 +47,234 @@ def _store_original_function(name: str, func: Callable) -> None:
         _original_zarr_functions[name] = func
 
 
-def patch_zarr_util_json() -> None:
+def patch_v3_json_encoder() -> None:
     """
-    Patch Zarr's core JSON utility functions.
+    Patch Zarr v3's JSON encoder class.
     
-    This function replaces zarr.util.json_dumps and zarr.util.json_loads
-    with enhanced versions that support additional Python types while
-    maintaining full compatibility with existing Zarr code.
+    This function replaces the V3JsonEncoder class with an enhanced version
+    that supports additional Python types while maintaining full compatibility
+    with existing Zarr code.
     
     Raises
     ------
     ImportError
-        If Zarr is not installed or zarr.util module is not available
+        If Zarr v3 metadata module is not available
     AttributeError
-        If expected Zarr functions are not found (API change)
+        If V3JsonEncoder class is not found (API change)
     """
     global _zarr_patching_active
     
     try:
-        import zarr.util
+        from zarr.core.metadata.v3 import V3JsonEncoder
+        import zarr.core.metadata.v3 as v3meta
     except ImportError as e:
         raise ImportError(
-            "Cannot patch Zarr utilities: Zarr not installed or incompatible version. "
+            "Cannot patch Zarr v3 JSON encoder: zarr.core.metadata.v3 not available. "
             "Please install Zarr v3.0+: pip install zarr>=3.0.0"
         ) from e
     
-    # Check if functions exist
-    if not hasattr(zarr.util, 'json_dumps'):
+    # Check if V3JsonEncoder exists
+    if not hasattr(v3meta, 'V3JsonEncoder'):
         raise AttributeError(
-            "zarr.util.json_dumps not found. This may indicate an incompatible "
-            "Zarr version or API change. Please check supported Zarr versions."
+            "V3JsonEncoder not found in zarr.core.metadata.v3. "
+            "This may indicate an incompatible Zarr version or API change."
         )
     
-    if not hasattr(zarr.util, 'json_loads'):
-        raise AttributeError(
-            "zarr.util.json_loads not found. This may indicate an incompatible "
-            "Zarr version or API change. Please check supported Zarr versions."
-        )
+    # Store original encoder class
+    _store_original_function('V3JsonEncoder', V3JsonEncoder)
     
-    # Store original functions
-    _store_original_function('zarr.util.json_dumps', zarr.util.json_dumps)
-    _store_original_function('zarr.util.json_loads', zarr.util.json_loads)
-    
-    # Create enhanced wrapper functions
-    def enhanced_zarr_json_dumps(obj: Any, **kwargs) -> bytes:
-        """Enhanced zarr.util.json_dumps with type preservation."""
-        # Convert object using our type handlers
-        converted_obj = serializers.convert_for_zarr_json(obj)
+    # Create enhanced encoder class
+    class EnhancedV3JsonEncoder(V3JsonEncoder):
+        """Enhanced V3JsonEncoder with support for additional Python types."""
         
-        # Call original Zarr function with converted object
-        return _original_zarr_functions['zarr.util.json_dumps'](converted_obj, **kwargs)
+        def default(self, obj: Any) -> Any:
+            """
+            Convert objects to JSON-serializable form using type handlers.
+            
+            This method is called by json.dumps() for objects that are not
+            natively JSON-serializable. It first tries our type handlers,
+            then falls back to the parent class behavior.
+            """
+            # Use our type handlers first
+            converted = serializers.convert_for_zarr_json(obj)
+            
+            # If our handlers converted the object, return the conversion
+            if converted is not obj:
+                return converted
+            
+            # Otherwise, fall back to parent class behavior
+            return super().default(obj)
     
-    def enhanced_zarr_json_loads(data: bytes, **kwargs) -> Any:
-        """Enhanced zarr.util.json_loads with type restoration."""
-        # Call original Zarr function first
-        loaded_data = _original_zarr_functions['zarr.util.json_loads'](data, **kwargs)
-        
-        # Restore objects using our type handlers
-        return serializers.restore_from_zarr_json(loaded_data)
+    # Apply the patch by replacing the class IN THE MODULE
+    v3meta.V3JsonEncoder = EnhancedV3JsonEncoder
     
-    # Apply patches
-    zarr.util.json_dumps = enhanced_zarr_json_dumps
-    zarr.util.json_loads = enhanced_zarr_json_loads
+    # CRITICAL FIX: Also patch it in the group module if it's imported there
+    try:
+        from zarr.core import group
+        # If group module has imported V3JsonEncoder, update it there too
+        if hasattr(group, 'V3JsonEncoder'):
+            group.V3JsonEncoder = EnhancedV3JsonEncoder
+            print("✅ Also patched V3JsonEncoder in zarr.core.group")
+    except (ImportError, AttributeError):
+        pass
     
     _zarr_patching_active = True
-    print("✅ Patched zarr.util.json_dumps and zarr.util.json_loads")
+    print("✅ Patched zarr.core.metadata.v3.V3JsonEncoder")
 
 
-def patch_zarr_v3_metadata() -> None:
+def patch_zarr_v3_json_loading() -> None:
     """
-    Patch Zarr v3 metadata serialization methods.
+    Patch Zarr v3's JSON loading to restore our enhanced types.
     
-    This function patches the to_buffer_dict and from_dict methods of
-    ArrayV3Metadata and GroupV3Metadata to ensure that our enhanced
-    JSON serialization is used for all metadata operations.
-    
-    Raises
-    ------
-    ImportError
-        If Zarr v3 metadata modules are not available
-    AttributeError
-        If expected metadata classes or methods are not found
+    This function ensures that when Zarr loads JSON data, our type
+    restoration logic is applied to convert enhanced JSON back to
+    proper Python objects.
     """
     try:
-        import zarr.core.metadata.v3
-    except ImportError as e:
-        raise ImportError(
-            "Cannot patch Zarr v3 metadata: zarr.core.metadata.v3 not available. "
-            "This may indicate Zarr v2 or incompatible version. "
-            "zarrcompatibility requires Zarr v3.0+."
-        ) from e
+        import zarr.core.metadata.v3 as v3meta
+        from zarr.core.metadata.v3 import ArrayV3Metadata
+        
+        # Store original from_dict method  
+        if hasattr(ArrayV3Metadata, 'from_dict'):
+            _store_original_function('ArrayV3Metadata.from_dict', ArrayV3Metadata.from_dict)
+            
+            @classmethod
+            def enhanced_from_dict(cls, data: Dict[str, Any]):
+                """Enhanced from_dict with type restoration - but skip Array metadata."""
+                # CRITICAL FIX: Do NOT apply our type restoration to Array metadata
+                # Array metadata needs specific numeric types that our restoration might break
+                # Only apply restoration to Group metadata where our custom types make sense
+                
+                # Call original method directly without restoration for Arrays
+                return _original_zarr_functions['ArrayV3Metadata.from_dict'](data)
+            
+            ArrayV3Metadata.from_dict = enhanced_from_dict
+            print("✅ Patched ArrayV3Metadata.from_dict (passthrough only)")
+        
+        # CRITICAL: Patch Attributes.__setitem__ to preserve dataclasses BEFORE Zarr processes them
+        try:
+            from zarr.core.attributes import Attributes
+            
+            if hasattr(Attributes, '__setitem__'):
+                _store_original_function('Attributes.__setitem__', Attributes.__setitem__)
+                
+                def enhanced_attributes_setitem(self, key, value):
+                    """Enhanced Attributes.__setitem__ that pre-processes complex types."""
+                    # Apply our type conversion to preserve complex types as enhanced JSON
+                    processed_value = serializers.convert_for_zarr_json(value)
+                    
+                    # Call original method with processed value
+                    return _original_zarr_functions['Attributes.__setitem__'](self, key, processed_value)
+                
+                Attributes.__setitem__ = enhanced_attributes_setitem
+                print("✅ Patched Attributes.__setitem__ to preserve complex types")
+            
+            # CRITICAL: Also patch Attributes.__getitem__ to restore types for memory store
+            if hasattr(Attributes, '__getitem__'):
+                _store_original_function('Attributes.__getitem__', Attributes.__getitem__)
+                
+                def enhanced_attributes_getitem(self, key):
+                    """Enhanced Attributes.__getitem__ that restores complex types."""
+                    # Get the raw value from original method
+                    raw_value = _original_zarr_functions['Attributes.__getitem__'](self, key)
+                    
+                    # Apply our type restoration
+                    restored_value = serializers.restore_from_zarr_json(raw_value)
+                    
+                    return restored_value
+                
+                Attributes.__getitem__ = enhanced_attributes_getitem
+                print("✅ Patched Attributes.__getitem__ to restore complex types")
+        
+        except ImportError:
+            print("⚠️  zarr.core.attributes.Attributes not found")
+        
+        # CRITICAL: Patch GroupMetadata.to_buffer_dict for Group attributes!
+        # This is where the actual JSON serialization happens for group attributes
+        try:
+            from zarr.core.group import GroupMetadata
+            
+            if hasattr(GroupMetadata, 'to_buffer_dict'):
+                _store_original_function('GroupMetadata.to_buffer_dict', GroupMetadata.to_buffer_dict)
+                
+                def enhanced_group_to_buffer_dict(self, prototype):
+                    """Enhanced GroupMetadata.to_buffer_dict that processes attributes."""
+                    import json
+                    from zarr.core.metadata.v3 import V3JsonEncoder, _replace_special_floats
+                    
+                    # Get the dict representation
+                    data = self.to_dict()
+                    
+                    # CRITICAL FIX: Only process 'attributes' for Groups, not Array metadata
+                    # Array metadata (data_type, shape, etc.) should NOT be enhanced
+                    if 'attributes' in data and data['attributes'] and data.get('node_type') == 'group':
+                        # Only process group attributes, skip array metadata
+                        processed_attributes = {}
+                        for key, value in data['attributes'].items():
+                            # Apply our type conversion to each attribute value
+                            processed_attributes[key] = serializers.convert_for_zarr_json(value)
+                        data['attributes'] = processed_attributes
+                    
+                    # Use enhanced JSON encoding
+                    class AttributeProcessingEncoder(V3JsonEncoder):
+                        def default(self, obj):
+                            # Apply our type conversion for any remaining objects
+                            converted = serializers.convert_for_zarr_json(obj)
+                            if converted is not obj:
+                                return converted
+                            return super().default(obj)
+                    
+                    # Use the standard Zarr flow but with our enhanced encoder
+                    json_str = json.dumps(_replace_special_floats(data), cls=AttributeProcessingEncoder)
+                    json_bytes = json_str.encode()
+                    
+                    # Return in the expected format
+                    if prototype is not None:
+                        return {"zarr.json": prototype.buffer.from_bytes(json_bytes)}
+                    else:
+                        return {"zarr.json": json_bytes}  
+                
+                
+                GroupMetadata.to_buffer_dict = enhanced_group_to_buffer_dict
+                print("✅ Patched GroupMetadata.to_buffer_dict for Group attributes")
+                
+        except ImportError:
+            print("⚠️  zarr.core.group.GroupMetadata not found")
+        
+        # Also patch GroupMetadata.from_dict for loading
+        try:
+            from zarr.core.group import GroupMetadata
+            
+            if hasattr(GroupMetadata, 'from_dict'):
+                _store_original_function('GroupMetadata.from_dict', GroupMetadata.from_dict)
+                
+                @classmethod
+                def enhanced_group_from_dict(cls, data: Dict[str, Any]):
+                    """Enhanced GroupMetadata.from_dict with type restoration."""
+                    # Make a copy to avoid modifying the original
+                    data_copy = data.copy() if isinstance(data, dict) else data
+                    
+                    # CRITICAL FIX: Apply our type restoration to attributes specifically
+                    if isinstance(data_copy, dict) and 'attributes' in data_copy and data_copy['attributes']:
+                        # Process each attribute through our type handlers
+                        restored_attributes = {}
+                        for key, value in data_copy['attributes'].items():
+                            restored_attributes[key] = serializers.restore_from_zarr_json(value)
+                        data_copy['attributes'] = restored_attributes
+                    
+                    # Call original method with restored data
+                    return _original_zarr_functions['GroupMetadata.from_dict'](data_copy)
+                
+                GroupMetadata.from_dict = enhanced_group_from_dict
+                print("✅ Patched GroupMetadata.from_dict for Group attributes")
+                
+        except ImportError:
+            print("⚠️  zarr.core.group.GroupMetadata.from_dict not found")
     
-    # Patch ArrayV3Metadata
-    try:
-        array_metadata_class = zarr.core.metadata.v3.ArrayV3Metadata
-        
-        # Check if methods exist
-        if not hasattr(array_metadata_class, 'to_buffer_dict'):
-            raise AttributeError("ArrayV3Metadata.to_buffer_dict not found")
-        if not hasattr(array_metadata_class, 'from_dict'):
-            raise AttributeError("ArrayV3Metadata.from_dict not found")
-        
-        # Store original methods
-        _store_original_function('ArrayV3Metadata.to_buffer_dict', array_metadata_class.to_buffer_dict)
-        _store_original_function('ArrayV3Metadata.from_dict', array_metadata_class.from_dict)
-        
-        # Create enhanced methods
-        def enhanced_array_to_buffer_dict(self, prototype):
-            """Enhanced ArrayV3Metadata.to_buffer_dict with type preservation."""
-            # Get the metadata as dict first
-            metadata_dict = self.to_dict()
-            
-            # Convert using our type handlers (this handles attributes)
-            converted_dict = serializers.convert_for_zarr_json(metadata_dict)
-            
-            # Call original method with converted dict
-            # Note: We need to temporarily replace the to_dict result
-            original_to_dict = self.to_dict
-            self.to_dict = lambda: converted_dict
-            
-            try:
-                result = _original_zarr_functions['ArrayV3Metadata.to_buffer_dict'](self, prototype)
-            finally:
-                self.to_dict = original_to_dict
-            
-            return result
-        
-        @classmethod
-        def enhanced_array_from_dict(cls, data):
-            """Enhanced ArrayV3Metadata.from_dict with type restoration."""
-            # Restore objects first using our type handlers
-            restored_data = serializers.restore_from_zarr_json(data)
-            
-            # Call original method with restored data
-            return _original_zarr_functions['ArrayV3Metadata.from_dict'](restored_data)
-        
-        # Apply patches
-        array_metadata_class.to_buffer_dict = enhanced_array_to_buffer_dict
-        array_metadata_class.from_dict = enhanced_array_from_dict
-        
-        print("✅ Patched ArrayV3Metadata.to_buffer_dict and from_dict")
-        
     except Exception as e:
         warnings.warn(
-            f"Failed to patch ArrayV3Metadata: {e}. "
-            "Array metadata may not preserve types correctly.",
-            UserWarning,
-            stacklevel=2
-        )
-    
-    # Patch GroupV3Metadata  
-    try:
-        group_metadata_class = zarr.core.metadata.v3.GroupV3Metadata
-        
-        # Check if methods exist
-        if not hasattr(group_metadata_class, 'to_buffer_dict'):
-            raise AttributeError("GroupV3Metadata.to_buffer_dict not found")
-        if not hasattr(group_metadata_class, 'from_dict'):
-            raise AttributeError("GroupV3Metadata.from_dict not found")
-        
-        # Store original methods
-        _store_original_function('GroupV3Metadata.to_buffer_dict', group_metadata_class.to_buffer_dict)
-        _store_original_function('GroupV3Metadata.from_dict', group_metadata_class.from_dict)
-        
-        # Create enhanced methods
-        def enhanced_group_to_buffer_dict(self, prototype):
-            """Enhanced GroupV3Metadata.to_buffer_dict with type preservation."""
-            # Get the metadata as dict first
-            metadata_dict = self.to_dict()
-            
-            # Convert using our type handlers (this handles attributes)
-            converted_dict = serializers.convert_for_zarr_json(metadata_dict)
-            
-            # Call original method with converted dict
-            original_to_dict = self.to_dict
-            self.to_dict = lambda: converted_dict
-            
-            try:
-                result = _original_zarr_functions['GroupV3Metadata.to_buffer_dict'](self, prototype)
-            finally:
-                self.to_dict = original_to_dict
-            
-            return result
-        
-        @classmethod  
-        def enhanced_group_from_dict(cls, data):
-            """Enhanced GroupV3Metadata.from_dict with type restoration."""
-            # Restore objects first using our type handlers
-            restored_data = serializers.restore_from_zarr_json(data)
-            
-            # Call original method with restored data
-            return _original_zarr_functions['GroupV3Metadata.from_dict'](restored_data)
-        
-        # Apply patches
-        group_metadata_class.to_buffer_dict = enhanced_group_to_buffer_dict
-        group_metadata_class.from_dict = enhanced_group_from_dict
-        
-        print("✅ Patched GroupV3Metadata.to_buffer_dict and from_dict")
-        
-    except Exception as e:
-        warnings.warn(
-            f"Failed to patch GroupV3Metadata: {e}. "
-            "Group metadata may not preserve types correctly.",
+            f"Failed to patch JSON loading: {e}. "
+            "Type restoration may not work correctly.",
             UserWarning,
             stacklevel=2
         )
@@ -256,7 +285,8 @@ def restore_original_zarr_functions() -> None:
     Restore all original Zarr functions, undoing all patches.
     
     This function reverses all patches applied by this module, restoring
-    Zarr to its original behavior. This is useful for testing and debugging.
+    Zarr to its original behavior. After calling this function, tuples will
+    again be converted to lists in Zarr metadata.
     """
     global _zarr_patching_active
     
@@ -271,36 +301,56 @@ def restore_original_zarr_functions() -> None:
     
     restoration_count = 0
     
-    # Restore zarr.util functions
-    try:
-        import zarr.util
-        if 'zarr.util.json_dumps' in _original_zarr_functions:
-            zarr.util.json_dumps = _original_zarr_functions['zarr.util.json_dumps']
+    # Restore V3JsonEncoder
+    if 'V3JsonEncoder' in _original_zarr_functions:
+        try:
+            import zarr.core.metadata.v3 as v3meta
+            v3meta.V3JsonEncoder = _original_zarr_functions['V3JsonEncoder']
             restoration_count += 1
-        if 'zarr.util.json_loads' in _original_zarr_functions:
-            zarr.util.json_loads = _original_zarr_functions['zarr.util.json_loads']
-            restoration_count += 1
-    except ImportError:
-        pass
+        except ImportError:
+            pass
     
     # Restore metadata classes
     try:
         import zarr.core.metadata.v3
         
         # Restore ArrayV3Metadata
-        if 'ArrayV3Metadata.to_buffer_dict' in _original_zarr_functions:
-            zarr.core.metadata.v3.ArrayV3Metadata.to_buffer_dict = _original_zarr_functions['ArrayV3Metadata.to_buffer_dict']
-            restoration_count += 1
         if 'ArrayV3Metadata.from_dict' in _original_zarr_functions:
             zarr.core.metadata.v3.ArrayV3Metadata.from_dict = _original_zarr_functions['ArrayV3Metadata.from_dict']
             restoration_count += 1
+            
+    except ImportError:
+        pass
+    
+    # Restore Attributes class
+    try:
+        from zarr.core.attributes import Attributes
         
-        # Restore GroupV3Metadata
-        if 'GroupV3Metadata.to_buffer_dict' in _original_zarr_functions:
-            zarr.core.metadata.v3.GroupV3Metadata.to_buffer_dict = _original_zarr_functions['GroupV3Metadata.to_buffer_dict']
+        # Restore Attributes.__setitem__
+        if 'Attributes.__setitem__' in _original_zarr_functions:
+            Attributes.__setitem__ = _original_zarr_functions['Attributes.__setitem__']
             restoration_count += 1
-        if 'GroupV3Metadata.from_dict' in _original_zarr_functions:
-            zarr.core.metadata.v3.GroupV3Metadata.from_dict = _original_zarr_functions['GroupV3Metadata.from_dict']
+        
+        # Restore Attributes.__getitem__
+        if 'Attributes.__getitem__' in _original_zarr_functions:
+            Attributes.__getitem__ = _original_zarr_functions['Attributes.__getitem__']
+            restoration_count += 1
+            
+    except ImportError:
+        pass
+    
+    # Restore GroupMetadata
+    try:
+        from zarr.core.group import GroupMetadata
+        
+        # Restore GroupMetadata.to_buffer_dict
+        if 'GroupMetadata.to_buffer_dict' in _original_zarr_functions:
+            GroupMetadata.to_buffer_dict = _original_zarr_functions['GroupMetadata.to_buffer_dict']
+            restoration_count += 1
+            
+        # Restore GroupMetadata.from_dict
+        if 'GroupMetadata.from_dict' in _original_zarr_functions:
+            GroupMetadata.from_dict = _original_zarr_functions['GroupMetadata.from_dict']
             restoration_count += 1
             
     except ImportError:
@@ -336,27 +386,37 @@ def get_patch_status() -> Dict[str, bool]:
     """
     status = {}
     
-    # Check zarr.util functions
+    # Check V3JsonEncoder
     try:
-        import zarr.util
-        status['zarr.util.json_dumps'] = 'zarr.util.json_dumps' in _original_zarr_functions
-        status['zarr.util.json_loads'] = 'zarr.util.json_loads' in _original_zarr_functions
+        import zarr.core.metadata.v3 as v3meta
+        status['V3JsonEncoder'] = 'V3JsonEncoder' in _original_zarr_functions
     except ImportError:
-        status['zarr.util.json_dumps'] = False
-        status['zarr.util.json_loads'] = False
+        status['V3JsonEncoder'] = False
     
     # Check metadata classes
     try:
         import zarr.core.metadata.v3
-        status['ArrayV3Metadata.to_buffer_dict'] = 'ArrayV3Metadata.to_buffer_dict' in _original_zarr_functions
         status['ArrayV3Metadata.from_dict'] = 'ArrayV3Metadata.from_dict' in _original_zarr_functions
-        status['GroupV3Metadata.to_buffer_dict'] = 'GroupV3Metadata.to_buffer_dict' in _original_zarr_functions
-        status['GroupV3Metadata.from_dict'] = 'GroupV3Metadata.from_dict' in _original_zarr_functions
     except ImportError:
-        status['ArrayV3Metadata.to_buffer_dict'] = False
         status['ArrayV3Metadata.from_dict'] = False
-        status['GroupV3Metadata.to_buffer_dict'] = False
-        status['GroupV3Metadata.from_dict'] = False
+    
+    # Check Attributes class
+    try:
+        from zarr.core.attributes import Attributes
+        status['Attributes.__setitem__'] = 'Attributes.__setitem__' in _original_zarr_functions
+        status['Attributes.__getitem__'] = 'Attributes.__getitem__' in _original_zarr_functions
+    except ImportError:
+        status['Attributes.__setitem__'] = False
+        status['Attributes.__getitem__'] = False
+    
+    # Check GroupMetadata classes
+    try:
+        from zarr.core.group import GroupMetadata
+        status['GroupMetadata.to_buffer_dict'] = 'GroupMetadata.to_buffer_dict' in _original_zarr_functions
+        status['GroupMetadata.from_dict'] = 'GroupMetadata.from_dict' in _original_zarr_functions
+    except ImportError:
+        status['GroupMetadata.to_buffer_dict'] = False
+        status['GroupMetadata.from_dict'] = False
     
     return status
 
@@ -378,20 +438,18 @@ def print_patch_status() -> None:
     print(f"📊 Overall: {patched_count}/{total_count} functions patched")
     print()
     
-    # Group by category
-    util_functions = {k: v for k, v in status.items() if k.startswith('zarr.util')}
-    metadata_functions = {k: v for k, v in status.items() if not k.startswith('zarr.util')}
+    # Show V3JsonEncoder status
+    v3_encoder_patched = status.get('V3JsonEncoder', False)
+    icon = "✅" if v3_encoder_patched else "❌"
+    status_text = "patched" if v3_encoder_patched else "original"
+    print(f"🎯 Core JSON Encoder:")
+    print(f"   {icon} V3JsonEncoder: {status_text}")
+    print()
     
-    if util_functions:
-        print("🛠️  Zarr Utility Functions:")
-        for func_name, is_patched in util_functions.items():
-            icon = "✅" if is_patched else "❌"
-            status_text = "patched" if is_patched else "original"
-            print(f"   {icon} {func_name}: {status_text}")
-        print()
-    
+    # Show metadata functions
+    metadata_functions = {k: v for k, v in status.items() if 'Metadata' in k}
     if metadata_functions:
-        print("📋 Zarr Metadata Functions:")
+        print("📋 Metadata Functions:")
         for func_name, is_patched in metadata_functions.items():
             icon = "✅" if is_patched else "❌"
             status_text = "patched" if is_patched else "original"
@@ -421,26 +479,26 @@ def validate_zarr_patches() -> bool:
         True if all patches are working correctly, False otherwise
     """
     try:
-        # Test basic tuple serialization through Zarr utilities
-        import zarr.util
+        # Test basic tuple serialization through V3JsonEncoder
+        from zarr.core.metadata.v3 import V3JsonEncoder
         
+        encoder = V3JsonEncoder()
         test_data = {"test_tuple": (1, 2, 3)}
         
-        # Test zarr.util.json_dumps
-        json_bytes = zarr.util.json_dumps(test_data)
+        # Test encoding
+        encoded = encoder.encode(test_data)
         
-        # Test zarr.util.json_loads  
-        restored_data = zarr.util.json_loads(json_bytes)
+        # Check if our enhancement is working
+        import json
+        decoded = json.loads(encoded)
         
-        # Verify tuple was preserved
-        if not isinstance(restored_data["test_tuple"], tuple):
+        # If tuple is preserved as our special format, patching works
+        if isinstance(decoded.get("test_tuple"), dict) and decoded["test_tuple"].get("__type__") == "tuple":
+            print("✅ Zarr patch validation successful - tuple preservation active")
+            return True
+        else:
+            print(f"❌ Zarr patch validation failed - tuple not preserved: {decoded}")
             return False
-        
-        if restored_data["test_tuple"] != (1, 2, 3):
-            return False
-        
-        print("✅ Zarr patch validation successful")
-        return True
         
     except Exception as e:
         print(f"❌ Zarr patch validation failed: {e}")

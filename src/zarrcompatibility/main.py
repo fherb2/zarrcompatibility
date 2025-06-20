@@ -12,7 +12,7 @@ JSON module.
     - Zero side effects on global JSON or other libraries  
     - Import order independence
     - Professional-grade production safety
-    - Zarr v3 optimized (v2 not supported)
+    - Zarr v3 optimized and tested
 
 🚀 **Quick Start:**
     >>> import zarrcompatibility as zc
@@ -25,11 +25,11 @@ JSON module.
     >>> # Tuples now preserved in Zarr!
     >>> with tempfile.TemporaryDirectory() as tmpdir:
     ...     group = zarr.open_group(f"{tmpdir}/test.zarr", mode="w")
-    ...     group.attrs["version"] = (2, 1, 0)  # Stays as tuple!
+    ...     group.attrs["version"] = (3, 0, 0)  # Stays as tuple!
     ...     group.store.close()
     ...     
     ...     reloaded = zarr.open_group(f"{tmpdir}/test.zarr", mode="r")
-    ...     assert reloaded.attrs["version"] == (2, 1, 0)
+    ...     assert reloaded.attrs["version"] == (3, 0, 0)
     ...     assert isinstance(reloaded.attrs["version"], tuple)  # ✅
 
 🔒 **Safety Guarantees:**
@@ -58,16 +58,7 @@ JSON module.
     - Zarr 3.0.0+ (v2 not supported)
     - See supported_zarr_versions.json for tested versions
 
-👥 **Migration from v2.0:**
-    Replace enable_universal_serialization() with enable_zarr_serialization()
-    
-    # Old (v2.0 - deprecated):
-    zc.enable_universal_serialization()  # ❌ Too invasive
-    
-    # New (v2.1 - recommended):  
-    zc.enable_zarr_serialization()       # ✅ Zarr-only, safe
-
-📋 **Version:** 2.1.0
+📋 **Version:** 3.0.0
 📧 **Author:** F. Herbrand  
 📄 **License:** MIT
 """
@@ -82,13 +73,12 @@ from . import zarr_patching
 from . import type_handlers
 
 # Module version
-__version__ = "2.1.0"
+__version__ = "3.0.0"
 __author__ = "F. Herbrand"
 __license__ = "MIT"
 
 # Global state tracking
 _zarr_patching_enabled = False
-_original_zarr_functions = {}
 
 
 def enable_zarr_serialization() -> None:
@@ -97,8 +87,7 @@ def enable_zarr_serialization() -> None:
     
     This function patches Zarr's internal JSON serialization methods to support
     additional Python types while leaving the global json module unchanged.
-    Unlike enable_universal_serialization(), this approach has no side effects
-    on other libraries.
+    This approach has no side effects on other libraries.
     
     The following types become serializable in Zarr metadata:
         - Tuples (preserved as tuples, not converted to lists)
@@ -109,14 +98,6 @@ def enable_zarr_serialization() -> None:
         - Complex numbers (as real/imaginary dicts)
         - Binary data (as base64 strings)
         - Decimal numbers (as strings)
-    
-    Parameters
-    ----------
-    None
-    
-    Returns
-    -------
-    None
     
     Raises
     ------
@@ -137,11 +118,11 @@ def enable_zarr_serialization() -> None:
     >>> 
     >>> with tempfile.TemporaryDirectory() as tmpdir:
     ...     group = zarr.open_group(f"{tmpdir}/test.zarr", mode="w")
-    ...     group.attrs["version"] = (1, 0)
+    ...     group.attrs["version"] = (3, 0, 0)
     ...     group.store.close()
     ...     
     ...     reloaded = zarr.open_group(f"{tmpdir}/test.zarr", mode="r")
-    ...     assert reloaded.attrs["version"] == (1, 0)
+    ...     assert reloaded.attrs["version"] == (3, 0, 0)
     ...     assert isinstance(reloaded.attrs["version"], tuple)
     
     Using with complex types:
@@ -165,7 +146,7 @@ def enable_zarr_serialization() -> None:
     This function should be called once at the beginning of your program,
     before any Zarr operations. It's safe to call multiple times.
     
-    Unlike global JSON patching, this approach ensures that:
+    This approach ensures that:
     - Standard json.dumps/loads remain unchanged
     - Other libraries (requests, pandas, etc.) are unaffected
     - No import order dependencies
@@ -188,8 +169,8 @@ def enable_zarr_serialization() -> None:
         version_manager.validate_zarr_version()
         
         # Step 2: Apply Zarr-specific patches
-        zarr_patching.patch_zarr_util_json()
-        zarr_patching.patch_zarr_v3_metadata()
+        zarr_patching.patch_v3_json_encoder()
+        zarr_patching.patch_zarr_v3_json_loading()
         
         # Step 3: Mark as enabled
         _zarr_patching_enabled = True
@@ -219,14 +200,6 @@ def disable_zarr_serialization() -> None:
     This function restores Zarr's original JSON serialization methods,
     removing all enhancements provided by this module. After calling this
     function, tuples will again be converted to lists in Zarr metadata.
-    
-    Parameters
-    ----------
-    None
-    
-    Returns
-    -------
-    None
     
     Notes
     -----
@@ -323,25 +296,6 @@ def test_serialization(obj: Any, verbose: bool = True) -> bool:
     return serializers.test_object_serialization(obj, verbose=verbose)
 
 
-# Maintain backward compatibility (deprecated)
-def enable_universal_serialization() -> None:
-    """
-    DEPRECATED: Use enable_zarr_serialization() instead.
-    
-    This function is deprecated and will be removed in a future version.
-    The new enable_zarr_serialization() function provides the same tuple
-    preservation functionality with better safety guarantees.
-    """
-    warnings.warn(
-        "enable_universal_serialization() is deprecated and will be removed "
-        "in a future version. Use enable_zarr_serialization() instead for "
-        "better safety and compatibility.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    enable_zarr_serialization()
-
-
 # Export main API
 __all__ = [
     "enable_zarr_serialization",
@@ -349,8 +303,9 @@ __all__ = [
     "is_zarr_serialization_enabled",
     "get_supported_zarr_versions",
     "test_serialization",
-    # Deprecated
-    "enable_universal_serialization",
+    "__version__",
+    "__author__",
+    "__license__",
 ]
 
 

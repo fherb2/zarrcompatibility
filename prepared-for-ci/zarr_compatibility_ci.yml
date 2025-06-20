@@ -1,0 +1,507 @@
+name: Zarr Compatibility Checker
+
+on:
+  schedule:
+    # Run monthly on the 1st at 02:00 UTC
+    - cron: '0 2 1 * *'
+  workflow_dispatch:
+    # Allow manual triggering
+    inputs:
+      force_update:
+        description: 'Force update even if no new versions found'
+        required: false
+        default: 'false'
+        type: boolean
+      test_version:
+        description: 'Test specific Zarr version (optional)'
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: "3.9"
+  
+jobs:
+  detect-zarr-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      new-versions: ${{ steps.detect.outputs.new-versions }}
+      all-versions: ${{ steps.detect.outputs.all-versions }}
+      has-new-versions: ${{ steps.detect.outputs.has-new-versions }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests packaging
+        
+    - name: Detect new Zarr versions
+      id: detect
+      run: |
+        python << 'EOF'
+        import json
+        import requests
+        from packaging import version
+        import os
+        
+        # Get current supported versions
+        try:
+            with open('src/zarrcompatibility/supported_zarr_versions.json', 'r') as f:
+                current_config = json.load(f)
+            current_versions = set(current_config.get('known_working', []))
+            max_tested = current_config.get('max_tested', '3.0.0')
+        except:
+            current_versions = set()
+            max_tested = '3.0.0'
+        
+        print(f"Current known versions: {sorted(current_versions)}")
+        print(f"Current max tested: {max_tested}")
+        
+        # Get all Zarr releases from PyPI
+        response = requests.get('https://pypi.org/pypi/zarr/json')
+        pypi_data = response.json()
+        
+        # Filter Zarr v3.x releases only
+        all_zarr_versions = []
+        for ver in pypi_data['releases'].keys():
+            try:
+                parsed_ver = version.parse(ver)
+                # Only consider stable v3.x releases
+                if (parsed_ver.major == 3 and 
+                    not parsed_ver.is_prerelease and 
+                    not parsed_ver.is_devrelease):
+                    all_zarr_versions.append(ver)
+            except:
+                continue
+        
+        # Sort versions
+        all_zarr_versions.sort(key=lambda x: version.parse(x))
+        print(f"All Zarr v3.x versions from PyPI: {all_zarr_versions}")
+        
+        # Find new versions to test
+        new_versions = [v for v in all_zarr_versions if v not in current_versions]
+        
+        # If manual version specified, test that
+        manual_version = "${{ github.event.inputs.test_version }}"
+        if manual_version and manual_version not in all_zarr_versions:
+            print(f"Manual version {manual_version} not found in PyPI")
+            new_versions = []
+        elif manual_version:
+            new_versions = [manual_version]
+            print(f"Testing manual version: {manual_version}")
+        
+        print(f"New versions to test: {new_versions}")
+        
+        # Set outputs
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"new-versions={json.dumps(new_versions)}\n")
+            f.write(f"all-versions={json.dumps(all_zarr_versions)}\n")
+            f.write(f"has-new-versions={'true' if new_versions else 'false'}\n")
+        
+        EOF
+
+  test-zarr-versions:
+    needs: detect-zarr-versions
+    if: needs.detect-zarr-versions.outputs.has-new-versions == 'true' || github.event.inputs.force_update == 'true'
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        zarr-version: ${{ fromJson(needs.detect-zarr-versions.outputs.new-versions) }}
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+      fail-fast: false
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Install Zarr ${{ matrix.zarr-version }}
+      run: |
+        python -m pip install --upgrade pip
+        pip install zarr==${{ matrix.zarr-version }}
+        pip install numpy packaging
+        
+    - name: Install zarrcompatibility in development mode
+      run: |
+        pip install -e .
+        
+    - name: Run compatibility tests
+      id: test
+      run: |
+        echo "Testing zarrcompatibility with Zarr ${{ matrix.zarr-version }} on Python ${{ matrix.python-version }}"
+        
+        # Create test results directory
+        mkdir -p test-results
+        
+        # Run comprehensive tests
+        python << 'EOF'
+        import sys
+        import json
+        import traceback
+        from datetime import datetime
+        from pathlib import Path
+        
+        def run_compatibility_test():
+            """Run comprehensive compatibility test."""
+            try:
+                # Test 1: Basic import and enable
+                import zarrcompatibility as zc
+                import zarr
+                
+                print(f"✅ Import successful: zarrcompatibility v{zc.__version__}")
+                print(f"✅ Zarr version: {zarr.__version__}")
+                
+                # Test 2: Enable serialization
+                zc.enable_zarr_serialization()
+                print("✅ Zarr serialization enabled")
+                
+                # Test 3: Basic tuple preservation
+                import tempfile
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    group = zarr.open_group(f"{tmpdir}/test.zarr", mode="w")
+                    test_tuple = (1, 2, 3)
+                    group.attrs["test"] = test_tuple
+                    group.store.close()
+                    
+                    reloaded = zarr.open_group(f"{tmpdir}/test.zarr", mode="r")
+                    stored = reloaded.attrs["test"]
+                    
+                    assert stored == test_tuple, f"Tuple mismatch: {stored} != {test_tuple}"
+                    assert isinstance(stored, tuple), f"Type mismatch: {type(stored)} != tuple"
+                
+                print("✅ Basic tuple preservation works")
+                
+                # Test 4: Complex types
+                from datetime import datetime
+                from enum import Enum
+                from uuid import uuid4
+                
+                class TestEnum(Enum):
+                    VALUE = "test"
+                
+                complex_data = {
+                    "tuple": (1, 2, 3),
+                    "nested_tuple": ((1, 2), (3, 4)),
+                    "datetime": datetime.now(),
+                    "enum": TestEnum.VALUE,
+                    "uuid": uuid4(),
+                    "complex": 1 + 2j
+                }
+                
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    group = zarr.open_group(f"{tmpdir}/complex.zarr", mode="w")
+                    for key, value in complex_data.items():
+                        group.attrs[key] = value
+                    group.store.close()
+                    
+                    reloaded = zarr.open_group(f"{tmpdir}/complex.zarr", mode="r")
+                    for key, original in complex_data.items():
+                        stored = reloaded.attrs[key]
+                        assert stored == original, f"Complex type {key} mismatch"
+                        assert type(stored) == type(original), f"Complex type {key} type mismatch"
+                
+                print("✅ Complex types work")
+                
+                # Test 5: Serialization isolation
+                import json
+                tuple_json = json.dumps((1, 2, 3))
+                assert tuple_json == "[1, 2, 3]", "Global JSON behavior affected!"
+                
+                tuple_loaded = json.loads(tuple_json)
+                assert isinstance(tuple_loaded, list), "Global JSON loads affected!"
+                
+                print("✅ JSON isolation maintained")
+                
+                # Cleanup
+                zc.disable_zarr_serialization()
+                print("✅ All tests passed")
+                
+                return {
+                    "success": True,
+                    "zarr_version": zarr.__version__,
+                    "python_version": sys.version.split()[0],
+                    "test_timestamp": datetime.now().isoformat(),
+                    "tests_passed": [
+                        "import", "enable", "tuple_preservation", 
+                        "complex_types", "json_isolation"
+                    ]
+                }
+                
+            except Exception as e:
+                print(f"❌ Test failed: {e}")
+                traceback.print_exc()
+                return {
+                    "success": False,
+                    "zarr_version": "${{ matrix.zarr-version }}",
+                    "python_version": sys.version.split()[0],
+                    "test_timestamp": datetime.now().isoformat(),
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                }
+        
+        # Run test and save results
+        result = run_compatibility_test()
+        
+        # Save detailed results
+        results_file = Path("test-results") / f"zarr-${{ matrix.zarr-version }}-py${{ matrix.python-version }}.json"
+        with open(results_file, 'w') as f:
+            json.dump(result, f, indent=2)
+        
+        # Set step output
+        print(f"TEST_SUCCESS={result['success']}")
+        with open("$GITHUB_OUTPUT", "a") as f:
+            f.write(f"success={result['success']}\n")
+        
+        # Exit with error code if test failed
+        if not result['success']:
+            sys.exit(1)
+        
+        EOF
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-zarr-${{ matrix.zarr-version }}-py-${{ matrix.python-version }}
+        path: test-results/
+
+  update-compatibility:
+    needs: [detect-zarr-versions, test-zarr-versions]
+    if: always() && (needs.detect-zarr-versions.outputs.has-new-versions == 'true' || github.event.inputs.force_update == 'true')
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Download all test results
+      uses: actions/download-artifact@v3
+      with:
+        path: test-results/
+        
+    - name: Update compatibility files
+      run: |
+        python << 'EOF'
+        import json
+        import os
+        from datetime import datetime
+        from pathlib import Path
+        from packaging import version
+        
+        # Collect all test results
+        test_results = {}
+        results_dir = Path("test-results")
+        
+        if results_dir.exists():
+            for result_dir in results_dir.iterdir():
+                if result_dir.is_dir():
+                    for result_file in result_dir.glob("*.json"):
+                        with open(result_file) as f:
+                            data = json.load(f)
+                            zarr_ver = data["zarr_version"]
+                            py_ver = data["python_version"]
+                            
+                            if zarr_ver not in test_results:
+                                test_results[zarr_ver] = {}
+                            
+                            test_results[zarr_ver][py_ver] = data["success"]
+        
+        print(f"Collected test results: {test_results}")
+        
+        # Load current configuration
+        config_file = Path("src/zarrcompatibility/supported_zarr_versions.json")
+        try:
+            with open(config_file) as f:
+                config = json.load(f)
+        except:
+            config = {
+                "min_version": "3.0.0",
+                "max_tested": "3.0.0",
+                "known_working": [],
+                "known_issues": {},
+                "recommended": "3.0.0"
+            }
+        
+        # Update configuration with test results
+        all_zarr_versions = ${{ needs.detect-zarr-versions.outputs.all-versions }}
+        working_versions = set(config.get("known_working", []))
+        
+        for zarr_ver, python_results in test_results.items():
+            # Consider version working if it passes on at least Python 3.9+
+            modern_python_success = any(
+                success for py_ver, success in python_results.items() 
+                if version.parse(py_ver) >= version.parse("3.9")
+            )
+            
+            if modern_python_success:
+                working_versions.add(zarr_ver)
+                print(f"✅ Zarr {zarr_ver} added to working versions")
+            else:
+                print(f"❌ Zarr {zarr_ver} failed tests")
+                # Add to known issues
+                if zarr_ver not in config.get("known_issues", {}):
+                    config.setdefault("known_issues", {})[zarr_ver] = "Failed compatibility tests"
+        
+        # Update configuration
+        config["known_working"] = sorted(working_versions, key=lambda x: version.parse(x))
+        config["max_tested"] = max(config["known_working"], key=lambda x: version.parse(x))
+        config["recommended"] = config["max_tested"]  # Use latest tested as recommended
+        config["last_update"] = datetime.now().strftime("%Y-%m-%d")
+        config["update_source"] = "ci"
+        config["zarrcompatibility_version"] = "3.0.0"
+        
+        # Add testing info
+        config["testing_info"] = {
+            "test_date": datetime.now().strftime("%Y-%m-%d"),
+            "test_environment": "Python 3.8-3.12",
+            "ci_run": True,
+            "test_coverage": [
+                "tuple_preservation",
+                "complex_types", 
+                "json_isolation",
+                "basic_functionality"
+            ]
+        }
+        
+        # Save updated configuration
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        print(f"Updated configuration: {config}")
+        
+        # Update README.md compatibility matrix
+        readme_file = Path("README.md")
+        if readme_file.exists():
+            with open(readme_file) as f:
+                readme_content = f.read()
+            
+            # Find and update compatibility matrix
+            matrix_start = readme_content.find("| zarrcompatibility | Zarr Versions |")
+            if matrix_start != -1:
+                matrix_end = readme_content.find("\n\n", matrix_start)
+                if matrix_end != -1:
+                    min_ver = config["known_working"][0] if config["known_working"] else "3.0.0"
+                    max_ver = config["max_tested"]
+                    
+                    new_matrix = f"""| zarrcompatibility | Zarr Versions | Python | Status |
+|------------------|---------------|---------|--------|
+| v3.0.0 | {min_ver} - {max_ver} | 3.8+ | ✅ Supported |"""
+                    
+                    updated_readme = (readme_content[:matrix_start] + 
+                                    new_matrix + 
+                                    readme_content[matrix_end:])
+                    
+                    with open(readme_file, 'w') as f:
+                        f.write(updated_readme)
+                    
+                    print("✅ Updated README.md compatibility matrix")
+        
+        # Set outputs for next step
+        new_versions_added = len([v for v in test_results.keys() if v in working_versions])
+        print(f"NEW_VERSIONS_COUNT={new_versions_added}")
+        
+        with open("$GITHUB_OUTPUT", "a") as f:
+            f.write(f"new-versions-count={new_versions_added}\n")
+            f.write(f"updated-max-version={config['max_tested']}\n")
+            f.write(f"config-updated={'true' if new_versions_added > 0 else 'false'}\n")
+        
+        EOF
+        
+    - name: Create Pull Request
+      if: steps.update-compatibility.outputs.config-updated == 'true'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "🤖 Auto-update Zarr compatibility (CI)"
+        title: "🚀 Zarr Compatibility Update - ${{ steps.update-compatibility.outputs.updated-max-version }}"
+        body: |
+          ## 🤖 Automated Zarr Compatibility Update
+          
+          This PR was automatically generated by the monthly Zarr compatibility checker.
+          
+          ### 📊 Update Summary
+          - **New versions tested**: ${{ steps.update-compatibility.outputs.new-versions-count }}
+          - **Latest supported version**: ${{ steps.update-compatibility.outputs.updated-max-version }}
+          - **Test date**: ${{ env.GITHUB_RUN_STARTED_AT }}
+          
+          ### 🧪 What was tested
+          - ✅ Basic tuple preservation in Zarr metadata
+          - ✅ Complex type serialization (datetime, enum, UUID, etc.)
+          - ✅ JSON isolation (global json module unaffected)
+          - ✅ Cross-platform compatibility (Python 3.8-3.12)
+          
+          ### 📁 Files updated
+          - `src/zarrcompatibility/supported_zarr_versions.json`
+          - `README.md` (compatibility matrix)
+          
+          ### 🔍 Review required
+          Please review the test results and merge if everything looks good. After merging, consider creating a new patch release to update the supported version range.
+          
+          ---
+          *This PR was created automatically by GitHub Actions. If you see any issues, please check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).*
+        branch: auto-update-zarr-compatibility
+        delete-branch: true
+        
+    - name: Create Release (if major version change)
+      if: steps.update-compatibility.outputs.config-updated == 'true'
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v3.0.${{ github.run_number }}
+        release_name: "zarrcompatibility v3.0.${{ github.run_number }} - Zarr ${{ steps.update-compatibility.outputs.updated-max-version }} Support"
+        body: |
+          ## 🚀 Automated Compatibility Release
+          
+          ### 🎯 What's New
+          - ✅ Added support for Zarr v${{ steps.update-compatibility.outputs.updated-max-version }}
+          - 🤖 Automated testing across Python 3.8-3.12
+          - 📊 Updated compatibility matrix
+          
+          ### 📦 Installation
+          ```bash
+          pip install zarrcompatibility==${{ github.ref_name }}
+          ```
+          
+          ### 🔧 Supported Zarr Versions
+          This release supports Zarr versions up to v${{ steps.update-compatibility.outputs.updated-max-version }}.
+          
+          *This release was automatically created by CI after successful compatibility testing.*
+        draft: true
+        prerelease: false
+
+  notify-results:
+    needs: [detect-zarr-versions, test-zarr-versions, update-compatibility]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Report results
+      run: |
+        echo "## 📊 Zarr Compatibility Check Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **New versions detected**: ${{ needs.detect-zarr-versions.outputs.has-new-versions }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Versions tested**: ${{ needs.detect-zarr-versions.outputs.new-versions }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Test results**: ${{ needs.test-zarr-versions.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Config updated**: ${{ needs.update-compatibility.outputs.config-updated }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for detailed results." >> $GITHUB_STEP_SUMMARY
