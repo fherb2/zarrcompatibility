@@ -1,0 +1,8 @@
+zarrcompatibility v3.0 - pytest Test Summary
+==================================================
+Exit status: 0
+Total tests: 73
+Failed tests: 0
+Passed tests: 73
+Success rate: 100.0%
+Status: PASS

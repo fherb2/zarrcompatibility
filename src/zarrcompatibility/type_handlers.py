@@ -85,6 +85,40 @@ def is_zarr_internal_object(obj: Any) -> bool:
     return False
 
 
+def is_zarr_array_metadata_field(key: str, value: Any) -> bool:
+    """
+    Check if a key-value pair is a Zarr array metadata field that should NOT be enhanced.
+    
+    Array metadata fields like fill_value, data_type, shape, etc. must remain in their
+    original format for Zarr to process them correctly.
+    
+    Parameters
+    ----------
+    key : str
+        The metadata key
+    value : any
+        The metadata value
+        
+    Returns
+    -------
+    bool
+        True if this is a Zarr array metadata field that should not be enhanced
+    """
+    # Zarr array metadata fields that MUST NOT be enhanced
+    zarr_array_fields = {
+        'fill_value',      # CRITICAL: Must remain numeric, not string!
+        'data_type',       # DataType enum - handled separately
+        'shape',           # Array shape tuple - but this is user-relevant
+        'chunk_grid',      # Chunk grid info
+        'codecs',          # Codec info
+        'dimension_names', # Dimension names
+        'zarr_format',     # Format version
+        'node_type',       # Node type
+    }
+    
+    return key in zarr_array_fields
+
+
 class TypeHandler:
     """Base class for type serialization handlers."""
     
@@ -377,7 +411,17 @@ def serialize_object(obj: Any) -> Any:
     
     CRITICAL FIX: Now checks for Zarr-internal objects first and skips them.
     """
-    # Handle basic JSON types first
+    # CRITICAL FIX: Check NumPy types BEFORE basic types!
+    # np.float64 is isinstance(float) so it would be caught by basic types check
+    if hasattr(type(obj), '__module__') and getattr(type(obj), '__module__', '').startswith('numpy'):
+        if hasattr(obj, 'dtype') and hasattr(obj, 'item'):
+            # This is a NumPy scalar - convert to native Python type
+            return obj.item()
+        elif hasattr(obj, 'tolist'):
+            # Fallback for other numpy types
+            return obj.tolist()
+    
+    # Handle basic JSON types AFTER NumPy check
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
     

@@ -34,6 +34,7 @@ import warnings
 from typing import Any, Dict, Optional, Callable
 
 from . import serializers
+from .type_handlers import is_zarr_array_metadata_field
 
 
 # Global registry of original Zarr functions for restoration
@@ -212,7 +213,10 @@ def patch_zarr_v3_json_loading() -> None:
                         processed_attributes = {}
                         for key, value in data['attributes'].items():
                             # Apply our type conversion to each attribute value
-                            processed_attributes[key] = serializers.convert_for_zarr_json(value)
+                            if not is_zarr_array_metadata_field(key, value):
+                                processed_attributes[key] = serializers.convert_for_zarr_json(value)
+                            else:
+                                processed_attributes[key] = value  # Keep array metadata unchanged
                         data['attributes'] = processed_attributes
                     
                     # Use enhanced JSON encoding
@@ -442,7 +446,7 @@ def print_patch_status() -> None:
     v3_encoder_patched = status.get('V3JsonEncoder', False)
     icon = "✅" if v3_encoder_patched else "❌"
     status_text = "patched" if v3_encoder_patched else "original"
-    print(f"🎯 Core JSON Encoder:")
+    print("🎯 Core JSON Encoder:")
     print(f"   {icon} V3JsonEncoder: {status_text}")
     print()
     

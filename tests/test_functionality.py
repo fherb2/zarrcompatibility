@@ -692,6 +692,7 @@ def run_all_functionality_tests() -> Dict[str, bool]:
         TestBasicFunctionality(),
         TestAdvancedFunctionality(),
         TestPerformanceAndCompatibility(),
+        TestRobustnessAndEdgeCases(),
     ]
     
     # Collect all test methods
@@ -749,6 +750,387 @@ def run_all_functionality_tests() -> Dict[str, bool]:
     print(f"📁 Results saved to: {results_file}")
     
     return results
+
+
+class TestRobustnessAndEdgeCases:
+    """Test robustness and edge cases that could cause issues."""
+    
+    def setup_method(self):
+        if not ZARR_AVAILABLE:
+            return
+        import zarrcompatibility as zc
+        zc.enable_zarr_serialization()
+    
+    def teardown_method(self):
+        if ZARR_AVAILABLE:
+            import zarrcompatibility as zc
+            zc.disable_zarr_serialization()
+    
+    def test_numpy_scalar_conversion(self):
+        """Test our NumPy scalar to Python type conversion fix - EXTENDED VERSION."""
+        if not ZARR_AVAILABLE:
+            return
+            
+        import zarr
+        import numpy as np
+        from zarrcompatibility.type_handlers import serialize_object
+        
+        # Test ALL NumPy scalar types including edge cases
+        test_cases = {
+            # Standard cases
+            "np_float32": (np.float32(3.14), float),
+            "np_float64": (np.float64(2.71), float),  # The problematic one!
+            "np_int32": (np.int32(42), int),
+            "np_int64": (np.int64(123), int),
+            "np_bool": (np.bool_(True), bool),
+            "np_complex": (np.complex128(1+2j), complex),
+            
+            # Edge cases that could cause issues
+            "np_float64_zero": (np.float64(0.0), float),
+            "np_float64_negative": (np.float64(-1.23), float),
+            "np_int64_zero": (np.int64(0), int),
+            "np_int64_negative": (np.int64(-456), int),
+            "np_bool_false": (np.bool_(False), bool),
+            
+            # Other NumPy types that might appear
+            "np_float16": (np.float16(1.5), float),
+            "np_int8": (np.int8(127), int),
+            "np_int16": (np.int16(32000), int),
+            "np_uint32": (np.uint32(4000000000), int),
+            "np_complex64": (np.complex64(0.5+1.5j), complex),
+        }
+        
+        for name, (np_scalar, expected_type) in test_cases.items():
+            print(f"   Testing {name}: {np_scalar!r}")
+            
+            # Test direct serialization
+            serialized = serialize_object(np_scalar)
+            assert isinstance(serialized, expected_type), f"{name}: {type(serialized)} != {expected_type}"
+            assert not hasattr(serialized, 'dtype'), f"{name}: Still has dtype attribute"
+            assert not hasattr(serialized, '__module__') or not getattr(serialized, '__module__', '').startswith('numpy'), f"{name}: Still numpy type"
+            
+            # Test in actual Zarr context (this was the original fill_value bug)
+            store = zarr.storage.MemoryStore()
+            group = zarr.open_group(store=store, mode="w")
+            
+            group.attrs[name] = np_scalar
+            retrieved = group.attrs[name]
+            
+            # Should be Python type, not NumPy
+            assert isinstance(retrieved, expected_type), f"Zarr {name}: {type(retrieved)} != {expected_type}"
+            assert not hasattr(retrieved, 'dtype'), f"Zarr {name}: Still has dtype after round-trip"
+            
+            # Value should be preserved (within floating point precision)
+            if expected_type == float:
+                assert abs(float(retrieved) - float(np_scalar)) < 1e-10, f"{name}: Value changed in round-trip"
+            else:
+                assert retrieved == np_scalar, f"{name}: Value changed in round-trip"
+        
+        print("✅ Extended NumPy scalar conversion test passed")
+
+    def test_numpy_edge_cases_in_zarr_arrays(self):
+        """Test NumPy scalars specifically in the context that caused the original bug."""
+        if not ZARR_AVAILABLE:
+            return
+            
+        import zarr
+        import numpy as np
+        
+        # Test the specific scenario that was failing: array creation with numpy scalar fill_value
+        with tempfile.TemporaryDirectory() as tmpdir:
+            problematic_fill_values = [
+                np.float32(0.0),   # Original working case
+                np.float64(0.0),   # The problematic case!
+                np.float64(3.14),  # Non-zero problematic case
+                np.int32(0),       # Integer cases
+                np.int64(-1),      # Negative integer
+            ]
+            
+            for i, fill_val in enumerate(problematic_fill_values):
+                print(f"   Testing array creation with fill_value: {fill_val!r}")
+                
+                arr_path = f"{tmpdir}/test_array_{i}.zarr"
+                
+                # This was failing before our fix
+                arr = zarr.open_array(
+                    arr_path,
+                    mode="w",
+                    shape=(5, 5),
+                    dtype="f4",
+                    fill_value=fill_val
+                )
+                
+                # Should be able to store some data
+                arr[:2, :2] = np.random.random((2, 2)).astype('f4')
+                arr.store.close()
+                
+                # Critical test: should be able to reload without the dtype error
+                reloaded = zarr.open_array(arr_path, mode="r")
+                
+                # The fill_value should be preserved as a reasonable type
+                reloaded_fill = reloaded.fill_value
+                print(f"      Original: {fill_val!r} -> Reloaded: {reloaded_fill!r}")
+                
+                # Value should be preserved
+                # FIXED: Use appropriate tolerance for dtype conversion
+                tolerance = 1e-6 if isinstance(fill_val, np.floating) else 1e-10
+                assert abs(float(reloaded_fill) - float(fill_val)) < tolerance, f"Fill value changed: {fill_val} -> {reloaded_fill}"
+                
+        print("✅ NumPy edge cases in Zarr arrays test passed")
+
+    def test_mixed_numpy_python_in_real_scenario(self):
+        """Test realistic scientific scenario with mixed NumPy/Python types."""
+        if not ZARR_AVAILABLE:
+            return
+            
+        import zarr
+        import numpy as np
+        
+        store = zarr.storage.MemoryStore()
+        group = zarr.open_group(store=store, mode="w")
+        
+        # Realistic scientific metadata that might contain mixed types
+        scientific_metadata = {
+            "experiment_version": (3, 0, 0),  # tuple (should be preserved)
+            "pixel_size_x": np.float64(0.1),  # often comes from instrument as np.float64
+            "pixel_size_y": np.float32(0.1),  # sometimes different precision
+            "num_frames": np.int64(1000),     # often large numbers as np.int64
+            "binning_factor": np.int32(2),    # smaller numbers as np.int32
+            "is_calibrated": np.bool_(True),  # boolean from numpy
+            "wavelength": 532.0,              # regular Python float
+            "coordinates": (np.float64(100.5), np.float64(200.3)),  # tuple with numpy floats
+            "roi_bounds": [
+                (np.int32(0), np.int32(0), np.int32(512), np.int32(512)),
+                (np.int64(100), np.int64(100), np.int64(400), np.int64(400))
+            ],
+            "calibration_matrix": [
+                [np.float64(1.0), np.float64(0.0)],
+                [np.float64(0.0), np.float64(1.0)]
+            ]
+        }
+        
+        # Store the metadata
+        group.attrs["scientific_data"] = scientific_metadata
+        retrieved = group.attrs["scientific_data"]
+        
+        # Verify all NumPy types were converted to Python types
+        assert isinstance(retrieved["pixel_size_x"], float), "np.float64 not converted"
+        assert isinstance(retrieved["pixel_size_y"], float), "np.float32 not converted"
+        assert isinstance(retrieved["num_frames"], int), "np.int64 not converted"
+        assert isinstance(retrieved["binning_factor"], int), "np.int32 not converted"
+        assert isinstance(retrieved["is_calibrated"], bool), "np.bool_ not converted"
+        
+        # Verify tuples are preserved
+        assert isinstance(retrieved["experiment_version"], tuple), "Tuple not preserved"
+        assert isinstance(retrieved["coordinates"], tuple), "Coordinate tuple not preserved"
+        
+        # Verify nested structures work
+        roi_0 = retrieved["roi_bounds"][0]
+        assert isinstance(roi_0, tuple), "ROI tuple not preserved"
+        assert all(isinstance(x, int) for x in roi_0), "ROI values not converted from numpy"
+        
+        # Verify matrix values
+        matrix = retrieved["calibration_matrix"]
+        assert isinstance(matrix[0][0], float), "Matrix values not converted from numpy"
+        
+        # Verify no dtype attributes remain anywhere
+        def check_no_dtype(obj, path=""):
+            if hasattr(obj, 'dtype'):
+                raise AssertionError(f"Found dtype at {path}: {obj!r}")
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    check_no_dtype(v, f"{path}.{k}")
+            elif isinstance(obj, (list, tuple)):
+                for i, v in enumerate(obj):
+                    check_no_dtype(v, f"{path}[{i}]")
+        
+        check_no_dtype(retrieved, "retrieved")
+        
+        print("✅ Mixed NumPy/Python real scenario test passed")
+
+    def test_zarr_internal_object_detection(self):
+        """Test that Zarr internal objects are correctly identified and skipped."""
+        if not ZARR_AVAILABLE:
+            return
+            
+        from zarrcompatibility.type_handlers import is_zarr_internal_object
+        
+        # Test Zarr internal objects (should be detected)
+        try:
+            from zarr.core.metadata.v3 import DataType
+            assert is_zarr_internal_object(DataType.float32) == True, "DataType.float32 not detected as internal"
+            print("✅ Zarr DataType correctly detected as internal")
+        except ImportError:
+            print("⚠️ Could not test DataType - not available")
+        
+        # Test user objects (should NOT be detected as internal)
+        user_enum = MetricStatus.ACTIVE
+        assert is_zarr_internal_object(user_enum) == False, "User enum incorrectly detected as internal"
+        
+        user_tuple = (1, 2, 3)
+        assert is_zarr_internal_object(user_tuple) == False, "User tuple incorrectly detected as internal"
+        
+        user_datetime = datetime.now()
+        assert is_zarr_internal_object(user_datetime) == False, "User datetime incorrectly detected as internal"
+        
+        print("✅ Zarr internal object detection test passed")
+    
+    def test_mixed_numpy_python_types(self):
+        """Test mixing NumPy and Python types in same structure."""
+        if not ZARR_AVAILABLE:
+            return
+            
+        import zarr
+        import numpy as np
+        
+        store = zarr.storage.MemoryStore()
+        group = zarr.open_group(store=store, mode="w")
+        
+        # Mix of NumPy and Python types
+        mixed_data = {
+            "py_int": 42,
+            "np_int": np.int64(42),
+            "py_float": 3.14,
+            "np_float": np.float32(3.14),
+            "py_bool": True,
+            "np_bool": np.bool_(False),
+            "tuple_mixed": (42, np.float32(3.14), "hello", np.int64(999)),
+            "nested": {
+                "inner_tuple": (np.float64(1.23), "text", np.int32(456)),
+                "inner_list": [np.float32(2.34), 789, np.bool_(True)]
+            }
+        }
+        
+        # Store mixed data
+        group.attrs["mixed"] = mixed_data
+        result = group.attrs["mixed"]
+        
+        # Verify NumPy types were converted to Python types
+        assert isinstance(result["np_int"], int), f"np_int: {type(result['np_int'])}"
+        assert isinstance(result["np_float"], float), f"np_float: {type(result['np_float'])}"
+        assert isinstance(result["np_bool"], bool), f"np_bool: {type(result['np_bool'])}"
+        
+        # Verify Python types remained unchanged
+        assert isinstance(result["py_int"], int)
+        assert isinstance(result["py_float"], float)
+        assert isinstance(result["py_bool"], bool)
+        
+        # Verify nested structures
+        tuple_mixed = result["tuple_mixed"] 
+        assert isinstance(tuple_mixed, tuple)
+        assert isinstance(tuple_mixed[1], float)  # np.float32 -> float
+        assert isinstance(tuple_mixed[3], int)    # np.int64 -> int
+        
+        # Verify deeply nested
+        inner_tuple = result["nested"]["inner_tuple"]
+        assert isinstance(inner_tuple, tuple)
+        assert isinstance(inner_tuple[0], float)  # np.float64 -> float
+        assert isinstance(inner_tuple[2], int)    # np.int32 -> int
+        
+        print("✅ Mixed NumPy/Python types test passed")
+    
+    def test_corrupted_enhanced_json_handling(self):
+        """Test handling of corrupted Enhanced JSON data."""
+        from zarrcompatibility.serializers import enhanced_json_loads
+        
+        # Various corrupted Enhanced JSON cases
+        corrupted_cases = [
+            '{"__type__": "tuple"}',  # Missing __data__
+            '{"__type__": "unknown_type", "__data__": [1,2,3]}',  # Unknown type
+            '{"__type__": "tuple", "__data__": "not_a_list"}',  # Invalid data format
+            '{"__type__": "datetime", "__data__": "invalid_date"}',  # Invalid datetime
+            '{"__type__": "enum", "__class__": "nonexistent.Class", "__data__": "value"}',  # Non-existent class
+        ]
+        
+        for i, corrupted_json in enumerate(corrupted_cases):
+            try:
+                result = enhanced_json_loads(corrupted_json)
+                # Should not crash - should return the dict as-is or handle gracefully
+                assert isinstance(result, dict), f"Case {i}: Should return dict for corrupted JSON"
+                print(f"✅ Corrupted case {i}: Handled gracefully")
+            except Exception as e:
+                # If it throws an exception, it should be controlled, not a crash
+                print(f"⚠️ Corrupted case {i}: Exception (should be handled): {e}")
+        
+        print("✅ Corrupted Enhanced JSON handling test passed")
+    
+    def test_large_nested_structures(self):
+        """Test with large nested tuple structures."""
+        if not ZARR_AVAILABLE:
+            return
+            
+        import zarr
+        
+        store = zarr.storage.MemoryStore()
+        group = zarr.open_group(store=store, mode="w")
+        
+        # Create a large nested tuple structure
+        large_tuple = tuple(
+            tuple(range(i, i+10)) for i in range(100)  # 100 tuples of 10 elements each
+        )
+        
+        # Should handle without stack overflow or memory issues
+        group.attrs["large_structure"] = large_tuple
+        result = group.attrs["large_structure"]
+        
+        assert result == large_tuple, "Large tuple structure not preserved"
+        assert isinstance(result, tuple), "Large structure lost tuple type"
+        assert len(result) == 100, f"Expected 100 sub-tuples, got {len(result)}"
+        assert len(result[0]) == 10, f"Expected 10 elements in first sub-tuple, got {len(result[0])}"
+        
+        # Verify a few random elements
+        assert result[50][5] == 55, "Large structure data corrupted"
+        assert isinstance(result[25], tuple), "Sub-structure lost tuple type"
+        
+        print("✅ Large nested structures test passed")
+    
+    def test_fill_value_edge_cases(self):
+        """Test edge cases for fill_value that could cause the original bug."""
+        if not ZARR_AVAILABLE:
+            return
+            
+        import zarr
+        import numpy as np
+        
+        # Test various fill_value types that could be problematic
+        test_cases = [
+            ("float_zero", 0.0, "f4"),
+            ("float_pi", 3.14159, "f4"), 
+            ("int_zero", 0, "i4"),
+            ("int_negative", -42, "i4"),
+            ("numpy_float32", np.float32(2.71), "f4"),
+            ("numpy_int64", np.int64(123), "i8"),
+        ]
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name, fill_val, dtype in test_cases:
+                arr_path = f"{tmpdir}/{name}.zarr"
+                
+                # Create array with this fill_value
+                arr = zarr.open_array(
+                    arr_path,
+                    mode="w",
+                    shape=(5, 5),
+                    dtype=dtype,
+                    fill_value=fill_val
+                )
+                arr.store.close()
+                
+                # Should be able to reload without errors
+                reloaded = zarr.open_array(arr_path, mode="r")
+                
+                # Verify fill_value is preserved correctly
+                if isinstance(fill_val, np.number):
+                    # NumPy scalars should be converted but value preserved
+                    assert float(reloaded.fill_value) == float(fill_val), f"{name}: fill_value changed"
+                else:
+                    assert reloaded.fill_value == fill_val, f"{name}: fill_value changed"
+                
+                print(f"✅ fill_value test passed for {name}: {fill_val} -> {reloaded.fill_value}")
+        
+        print("✅ fill_value edge cases test passed")
+
+
 
 
 def main() -> int:

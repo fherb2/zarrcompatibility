@@ -23,7 +23,7 @@ License: MIT
 import json
 import warnings
 from pathlib import Path
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, Tuple, Any, Optional
 from packaging import version
 
 

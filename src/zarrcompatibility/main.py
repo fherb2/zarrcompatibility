@@ -64,7 +64,7 @@ JSON module.
 """
 
 import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 # Import sub-modules
 from . import version_manager
@@ -310,7 +310,7 @@ __all__ = [
 
 
 # Module-level setup validation
-def _validate_module_import():
+def _validate_module_import() -> None:
     """Validate module can be imported safely."""
     try:
         # Check Python version

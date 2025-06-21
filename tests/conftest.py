@@ -303,8 +303,8 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 # Skip deprecated tests
-def pytest_ignore_collect(path, config):
+def pytest_ignore_collect(collection_path, config):
     """Ignore deprecated test files."""
-    if path.basename == "test_json_patch.py":
+    if collection_path.name == "test_json_patch.py":
         return True
     return False
